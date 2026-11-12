@@ -1,0 +1,24 @@
+{
+  "port": 8787,
+  "check_interval_hours": 6,
+  "projects": [
+    {
+      "id": "example-project-staging",
+      "name": "Example Project",
+      "gitlab_url": "https://gitlab.example.com",
+      "path": "group/project",
+      "ref": "staging",
+      "variables": {},
+      "auto_play": [
+        "build:main"
+      ],
+      "auto_typo3": {
+        "enabled": false,
+        "major": 13,
+        "variables": {
+          "TARGET_TASK_NAME": "task01"
+        }
+      }
+    }
+  ]
+}

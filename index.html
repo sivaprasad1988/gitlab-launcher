@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GitLab Launcher</title>
+<style>
+:root{
+  --bg:#f5f6f8;--card:#fff;--fg:#1c2230;--mut:#6b7280;--bd:#e4e7eb;--hover:#f0f2f5;
+  --acc:#4f46e5;--acc-fg:#fff;--ok:#15803d;--err:#b91c1c;--run:#b45309;--chip:#eef0f4;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0f1115;--card:#171a21;--fg:#e6e8ec;--mut:#9aa1ad;--bd:#272c36;--hover:#1e222b;
+  --acc:#818cf8;--acc-fg:#0f1115;--ok:#4ade80;--err:#f87171;--run:#fbbf24;--chip:#232833;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+a{color:var(--acc);text-decoration:none}
+header{background:var(--card);border-bottom:1px solid var(--bd);position:sticky;top:0;z-index:5}
+.bar{max-width:1080px;margin:0 auto;padding:0 16px;height:56px;display:flex;align-items:center;gap:24px}
+.brand{font-weight:700;font-size:15px;color:var(--fg)}
+nav{display:flex;gap:4px;flex:1}
+nav a{color:var(--mut);padding:6px 12px;border-radius:6px;font-weight:500}
+nav a.on,nav a:hover{color:var(--fg);background:var(--hover)}
+.pill{font-size:12px;padding:3px 10px;border-radius:12px;background:var(--chip);color:var(--mut);white-space:nowrap}
+.pill.bad{color:var(--err)}
+main{max-width:1080px;margin:0 auto;padding:28px 16px 60px}
+.head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:20px}
+h1{font-size:22px;margin:0}h2{font-size:15px;margin:0 0 12px}
+.sub{color:var(--mut);font-size:13px;margin-top:2px}
+.crumb{font-size:13px;color:var(--mut);margin-bottom:6px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:18px}
+.stack>*+*{margin-top:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.two{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:16px;align-items:start}
+@media (max-width:820px){.two{grid-template-columns:1fr}.bar{gap:12px}.brand{display:none}}
+.pcard{display:block;color:inherit;background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;transition:border-color .15s}
+.pcard:hover{border-color:var(--acc)}
+.pcard .name{font-weight:600;font-size:15px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.chip{font-size:12px;padding:2px 8px;border-radius:10px;background:var(--chip);color:var(--mut)}
+.chip.ref{font-family:ui-monospace,Menlo,monospace;color:var(--fg)}
+.last{margin-top:12px;padding-top:10px;border-top:1px solid var(--bd);font-size:12px;color:var(--mut)}
+.btn{display:inline-flex;align-items:center;gap:6px;background:var(--acc);color:var(--acc-fg);border:0;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer}
+.btn.sec{background:transparent;color:var(--fg);border:1px solid var(--bd)}
+.btn.danger{background:transparent;color:var(--err);border:1px solid var(--err)}
+.btn.sm{padding:4px 10px;font-size:12px}
+.btn:disabled{opacity:.5;cursor:default}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--bd);vertical-align:middle}
+th{color:var(--mut);font-weight:500;font-size:12px}
+tr:last-child td{border-bottom:0}
+.wrap{overflow-x:auto}
+dl{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:0;font-size:13px}
+dt{color:var(--mut)}dd{margin:0;word-break:break-word}
+.st{font-weight:600;font-size:12px}
+.s-success{color:var(--ok)}.s-failed,.s-canceled{color:var(--err)}
+.s-running,.s-pending,.s-created,.s-preparing,.s-waiting_for_resource{color:var(--run)}.s-manual,.s-scheduled{color:var(--acc)}
+.runs a{display:flex;justify-content:space-between;gap:8px;padding:8px 6px;border-bottom:1px solid var(--bd);color:inherit;font-size:13px}
+.runs a:hover,.runs a.on{background:var(--hover)}
+.runs a:last-child{border-bottom:0}
+.empty{color:var(--mut);font-size:13px;padding:8px 0}
+form .sec-title{font-weight:600;margin:4px 0 10px}
+.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+label{display:block;font-size:12px;color:var(--mut);margin-bottom:4px}
+input{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:8px 10px;font-size:13px}
+input:focus{outline:2px solid var(--acc);outline-offset:-1px}
+.check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--fg)}
+.check input{width:auto}
+.hint{font-size:12px;color:var(--mut);margin-top:4px}
+.danger-zone{border-color:var(--err)}
+#toast{position:fixed;right:16px;bottom:16px;max-width:420px;background:var(--fg);color:var(--bg);padding:10px 14px;border-radius:8px;font-size:13px;opacity:0;transform:translateY(8px);transition:.2s;pointer-events:none;z-index:9}
+#toast.show{opacity:1;transform:none}#toast.err{background:var(--err);color:#fff}
+code{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+</style>
+</head>
+<body>
+<header><div class="bar">
+  <a class="brand" href="#/">GitLab Launcher</a>
+  <nav>
+    <a href="#/" data-nav="projects">Projects</a>
+    <a href="#/activity" data-nav="activity">Activity</a>
+    <a href="#/settings" data-nav="settings">Settings</a>
+  </nav>
+  <span class="pill" id="tokenPill">…</span>
+</div></header>
+<main id="view"></main>
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const ACTIVE = ["created","waiting_for_resource","preparing","pending","running","manual","scheduled"];
+let S = null, pollT = null;
+
+async function api(path, body) {
+  const r = await fetch(path, body ? {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)} : {});
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || r.status);
+  return d;
+}
+function toast(msg, err) {
+  const t = $("#toast"); t.textContent = msg; t.className = "show" + (err ? " err" : "");
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.className = "", 4500);
+}
+const varsStr = o => Object.entries(o || {}).map(([k, v]) => `${k}=${v}`).join(", ");
+const parseVars = s => Object.fromEntries((s || "").split(",").map(x => x.trim()).filter(x => x.includes("="))
+  .map(x => { const i = x.indexOf("="); return [x.slice(0, i).trim(), x.slice(i + 1).trim()]; }).filter(([k]) => k));
+const proj = id => S.projects.find(p => p.id === id);
+const pUrl = p => `#/p/${encodeURIComponent(p.id)}`;
+const glUrl = p => `${p.gitlab_url}/${p.path}/-/pipelines`;
+const fmt = t => t ? t.replace("T", " ") : "–";
+
+async function refresh() {
+  S = await api("/api/state");
+  const pill = $("#tokenPill");
+  pill.textContent = S.token_source ? "Token ✓" : "No token";
+  pill.className = "pill" + (S.token_source ? "" : " bad");
+}
+
+/* ---------------- router ---------------- */
+async function render() {
+  clearTimeout(pollT);
+  if (!S) await refresh();
+  const [a, b, c, d] = (location.hash.slice(1) || "/").split("/").filter(Boolean);
+  const navKey = !a || a === "p" || a === "new" ? "projects" : a;
+  document.querySelectorAll("[data-nav]").forEach(n => n.classList.toggle("on", n.dataset.nav === navKey));
+  if (!a) return viewProjects();
+  if (a === "new") return viewForm();
+  if (a === "activity") return viewActivity();
+  if (a === "settings") return viewSettings();
+  if (a === "p" && b) {
+    const p = proj(decodeURIComponent(b));
+    if (!p) return $("#view").innerHTML = `<p class="empty">Project not found. <a href="#/">Back</a></p>`;
+    return c === "edit" ? viewForm(p) : viewProject(p, c === "pl" ? Number(d) : null);
+  }
+  $("#view").innerHTML = `<p class="empty">Page not found. <a href="#/">Back</a></p>`;
+}
+
+/* ---------------- views ---------------- */
+function viewProjects() {
+  const cards = S.projects.map(p => {
+    const last = S.runs.find(r => r.project === p.id);
+    const a = p.auto_typo3 || {};
+    return `<a class="pcard" href="${pUrl(p)}">
+      <div class="name">${esc(p.name)}</div>
+      <div class="sub">${esc(p.path)}</div>
+      <div class="chips">
+        <span class="chip ref">${esc(p.ref)}</span>
+        ${(p.auto_play || []).length ? `<span class="chip">auto-play: ${esc(p.auto_play.join(", "))}</span>` : ""}
+        ${a.enabled ? `<span class="chip">TYPO3 ${esc(a.major)} auto-update</span>` : ""}
+      </div>
+      <div class="last">${last ? `Last run: #${esc(last.pipeline)} · ${esc(fmt(last.t))} · ${esc(last.trigger)}` : "No runs yet"}</div>
+    </a>`;
+  }).join("");
+  $("#view").innerHTML = `
+    <div class="head"><div><h1>Projects</h1><div class="sub">${S.projects.length} project(s)</div></div>
+      <a class="btn" href="#/new">+ New project</a></div>
+    ${cards ? `<div class="grid">${cards}</div>` : `<div class="card empty">No projects yet. <a href="#/new">Create one</a>.</div>`}`;
+}
+
+function viewProject(p, pipelineId) {
+  const a = p.auto_typo3 || {};
+  const runs = S.runs.filter(r => r.project === p.id);
+  const pid = pipelineId || (runs[0] && runs[0].pipeline);
+  $("#view").innerHTML = `
+    <div class="crumb"><a href="#/">Projects</a> / ${esc(p.name)}</div>
+    <div class="head">
+      <div><h1>${esc(p.name)}</h1>
+        <div class="sub">${esc(p.path)} · <code>${esc(p.ref)}</code> · <a href="${esc(glUrl(p))}" target="_blank" rel="noopener">Open in GitLab ↗</a></div></div>
+      <div class="actions">
+        <button class="btn" data-act="run" data-mode="normal">▶ Run pipeline</button>
+        ${a.enabled ? `<button class="btn sec" data-act="run" data-mode="update">Run TYPO3 update</button>` : ""}
+        <a class="btn sec" href="${pUrl(p)}/edit">Edit</a>
+      </div>
+    </div>
+    <div class="two">
+      <div class="card"><h2 id="pipeTitle">${pid ? "Pipeline #" + esc(pid) : "Pipeline"}</h2>
+        <div id="pipe">${pid ? `<p class="empty">Loading…</p>` : `<p class="empty">No pipeline started from the launcher yet. Click “Run pipeline”.</p>`}</div></div>
+      <div class="stack">
+        <div class="card"><h2>Configuration</h2><dl>
+          <dt>Branch</dt><dd><code>${esc(p.ref)}</code></dd>
+          <dt>Variables</dt><dd>${esc(varsStr(p.variables)) || "–"}</dd>
+          <dt>Auto-play</dt><dd>${esc((p.auto_play || []).join(", ")) || "–"}</dd>
+          <dt>TYPO3 auto</dt><dd>${a.enabled ? `on · v${esc(a.major)} · seen ${esc(S.typo3_seen[p.id] || "–")}` : "off"}</dd>
+          ${a.enabled ? `<dt>Update vars</dt><dd>${esc(varsStr(a.variables)) || "–"}</dd>` : ""}
+        </dl></div>
+        <div class="card"><h2>Recent runs</h2><div class="runs">
+          ${runs.map(r => `<a href="${pUrl(p)}/pl/${Number(r.pipeline)}" class="${r.pipeline === pid ? "on" : ""}">
+            <span>#${esc(r.pipeline)} · ${esc(r.trigger)}</span><span class="sub">${esc(fmt(r.t))}</span></a>`).join("")
+            || `<p class="empty">No runs yet.</p>`}
+        </div></div>
+        <div class="card danger-zone"><h2>Danger zone</h2>
+          <p class="sub" style="margin:0 0 10px">Removes the project from the launcher only. Nothing changes in GitLab.</p>
+          <button class="btn danger sm" data-act="del">Remove project</button></div>
+      </div>
+    </div>`;
+  $("#view").dataset.project = p.id;
+  if (pid) loadPipeline(p, pid);
+}
+
+async function loadPipeline(p, pid) {
+  clearTimeout(pollT);
+  try {
+    const d = await api(`/api/pipeline?project=${encodeURIComponent(p.id)}&id=${pid}`);
+    if (!$("#pipe") || $("#view").dataset.project !== p.id) return;
+    $("#pipeTitle").innerHTML = `Pipeline #${esc(pid)} · <span class="st s-${esc(d.pipeline.status)}">${esc(d.pipeline.status)}</span>
+      · <a href="${esc(d.pipeline.web_url)}" target="_blank" rel="noopener" style="font-weight:400;font-size:13px">GitLab ↗</a>`;
+    $("#pipe").innerHTML = `<div class="wrap"><table><thead><tr><th>Stage</th><th>Job</th><th>Status</th><th></th></tr></thead><tbody>
+      ${d.jobs.slice().reverse().map(j => `<tr><td>${esc(j.stage)}</td><td>${esc(j.name)}</td>
+        <td><span class="st s-${esc(j.status)}">${esc(j.status)}</span></td>
+        <td>${j.status === "manual" ? `<button class="btn sm" data-act="play" data-job="${Number(j.id)}" data-name="${esc(j.name)}">▶ Play</button>` : ""}</td></tr>`).join("")
+        || `<tr><td colspan="4" class="empty">No jobs.</td></tr>`}
+      </tbody></table></div>`;
+    if (ACTIVE.includes(d.pipeline.status)) pollT = setTimeout(() => loadPipeline(p, pid), 5000);
+  } catch (e) { if ($("#pipe")) $("#pipe").innerHTML = `<p class="empty">Error: ${esc(e.message)}</p>`; }
+}
+
+function viewForm(p) {
+  const a = (p && p.auto_typo3) || {enabled:false, major:13, variables:{TARGET_TASK_NAME:"shup01"}, auto_play:[]};
+  $("#view").innerHTML = `
+    <div class="crumb"><a href="#/">Projects</a> / ${p ? `<a href="${pUrl(p)}">${esc(p.name)}</a> / Edit` : "New project"}</div>
+    <div class="head"><h1>${p ? "Edit project" : "New project"}</h1></div>
+    <form id="pform" class="stack">
+      <div class="card"><div class="sec-title">Basics</div><div class="fields">
+        <div><label>Name</label><input name="name" value="${esc(p?.name)}" placeholder="WVG Online"></div>
+        <div><label>GitLab URL</label><input name="gitlab_url" value="${esc(p?.gitlab_url || "https://gitlab.gingco.de")}"></div>
+        <div><label>Project path *</label><input name="path" value="${esc(p?.path)}" placeholder="group/project" required></div>
+        <div><label>Branch *</label><input name="ref" value="${esc(p?.ref)}" placeholder="staging" required></div>
+      </div></div>
+      <div class="card"><div class="sec-title">Run pipeline</div><div class="fields">
+        <div><label>Variables</label><input name="variables" value="${esc(varsStr(p?.variables))}" placeholder="KEY=VALUE, KEY2=VALUE2"></div>
+        <div><label>Auto-play manual jobs</label><input name="auto_play" value="${esc((p?.auto_play || []).join(", "))}" placeholder="build:main">
+          <div class="hint">These manual jobs are started automatically when ready.</div></div>
+      </div></div>
+      <div class="card"><div class="sec-title">TYPO3 auto-update</div>
+        <label class="check"><input type="checkbox" name="auto_enabled" ${a.enabled ? "checked" : ""}> Start update pipeline when a new TYPO3 release appears</label>
+        <div class="fields" style="margin-top:12px">
+          <div><label>TYPO3 major</label><input name="major" value="${esc(a.major)}"></div>
+          <div><label>Update variables</label><input name="auto_variables" value="${esc(varsStr(a.variables))}"></div>
+          <div><label>Auto-play jobs (update)</label><input name="auto_typo3_play" value="${esc((a.auto_play || []).join(", "))}"></div>
+        </div></div>
+      <div class="actions"><button class="btn" type="submit">${p ? "Save changes" : "Create project"}</button>
+        <a class="btn sec" href="${p ? pUrl(p) : "#/"}">Cancel</a></div>
+    </form>`;
+  $("#pform").onsubmit = async ev => {
+    ev.preventDefault();
+    const f = new FormData(ev.target);
+    const body = {name:f.get("name"), gitlab_url:f.get("gitlab_url"), path:f.get("path"), ref:f.get("ref"),
+      variables:parseVars(f.get("variables")), auto_play:f.get("auto_play"),
+      auto_enabled:f.get("auto_enabled") === "on", major:f.get("major"),
+      auto_variables:parseVars(f.get("auto_variables")), auto_typo3_play:f.get("auto_typo3_play")};
+    try {
+      const saved = p ? await api("/api/projects/update", {...body, id:p.id}) : await api("/api/projects", body);
+      await refresh(); toast(p ? "Project saved" : "Project created"); location.hash = pUrl(saved);
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+function viewActivity() {
+  $("#view").innerHTML = `
+    <div class="head"><h1>Activity</h1></div>
+    <div class="stack">
+      <div class="card"><h2>Pipeline runs</h2><div class="wrap"><table>
+        <thead><tr><th>Time</th><th>Project</th><th>Pipeline</th><th>Trigger</th></tr></thead><tbody>
+        ${S.runs.map(r => { const p = proj(r.project); return `<tr><td>${esc(fmt(r.t))}</td>
+          <td>${p ? `<a href="${pUrl(p)}">${esc(p.name)}</a>` : esc(r.project)}</td>
+          <td>${p ? `<a href="${pUrl(p)}/pl/${Number(r.pipeline)}">#${esc(r.pipeline)}</a>` : "#" + esc(r.pipeline)}</td>
+          <td>${esc(r.trigger)}</td></tr>`; }).join("") || `<tr><td colspan="4" class="empty">No runs yet.</td></tr>`}
+        </tbody></table></div></div>
+      <div class="card"><h2>Log</h2><div class="wrap"><table><tbody>
+        ${S.log.map(l => `<tr><td class="sub" style="white-space:nowrap">${esc(fmt(l.t))}</td><td>${esc(l.msg)}</td></tr>`).join("")
+          || `<tr><td class="empty">Empty.</td></tr>`}
+      </tbody></table></div></div>
+    </div>`;
+}
+
+function viewSettings() {
+  const src = {app:"Stored in the app folder (.gitlab-token, chmod 600). It is never shown again.",
+    home:"Using ~/.gitlab-token (fallback). Save a token here to store it in the app folder."}[S.token_source] || "No token stored.";
+  $("#view").innerHTML = `
+    <div class="head"><h1>Settings</h1></div>
+    <div class="stack">
+      <div class="card"><h2>GitLab token</h2><p class="sub" style="margin:0 0 12px">${esc(src)}</p>
+        <form id="tform" class="fields">
+          <div><label>Personal access token (scope: api)</label><input name="token" type="password" autocomplete="off" placeholder="glpat-…" required></div>
+          <div class="actions" style="align-items:end"><button class="btn" type="submit">Save token</button>
+            <button class="btn sec" type="button" data-act="tokentest">Test</button>
+            <button class="btn danger" type="button" data-act="tokendel">Remove</button></div>
+        </form></div>
+      <div class="card"><h2>TYPO3 release check</h2><dl>
+        <dt>Interval</dt><dd>every ${esc(S.interval)} h (while the launcher runs)</dd>
+        <dt>Last check</dt><dd>${esc(fmt(S.last_check))}</dd>
+        <dt>Latest</dt><dd>${Object.entries(S.typo3_latest).map(([m, v]) => `TYPO3 ${esc(m)}: ${esc(v)}`).join(", ") || "–"}</dd>
+      </dl><div style="margin-top:12px"><button class="btn sec" data-act="check">Check now</button></div></div>
+    </div>`;
+  $("#tform").onsubmit = async ev => {
+    ev.preventDefault();
+    try { const d = await api("/api/token", {token:ev.target.token.value}); ev.target.reset(); await refresh(); viewSettings(); toast(d.msg); }
+    catch (e) { toast(e.message, true); }
+  };
+}
+
+/* ---------------- actions ---------------- */
+const actions = {
+  async run(el) {
+    const p = proj($("#view").dataset.project), upd = el.dataset.mode === "update";
+    if (!confirm(`Start ${upd ? "TYPO3 update pipeline" : "pipeline"} for ${p.name} (${p.ref})?`)) return;
+    el.disabled = true;
+    try { const r = await api("/api/run", {project:p.id, mode:el.dataset.mode}); await refresh();
+      toast(`Pipeline #${r.id} started`); location.hash = `${pUrl(p)}/pl/${r.id}`; }
+    catch (e) { toast(e.message, true); el.disabled = false; }
+  },
+  async play(el) {
+    const p = proj($("#view").dataset.project);
+    if (!confirm(`Start manual job "${el.dataset.name}"?`)) return;
+    el.disabled = true;
+    try { await api("/api/play", {project:p.id, job:Number(el.dataset.job)}); toast(`${el.dataset.name} started`); render(); }
+    catch (e) { toast(e.message, true); el.disabled = false; }
+  },
+  async del() {
+    const p = proj($("#view").dataset.project);
+    if (!confirm(`Remove ${p.name} from the launcher?`)) return;
+    try { await api("/api/projects/delete", {id:p.id}); await refresh(); toast("Project removed"); location.hash = "#/"; }
+    catch (e) { toast(e.message, true); }
+  },
+  async check(el) {
+    el.disabled = true;
+    try { await api("/api/check-now", {}); await refresh(); viewSettings(); toast("TYPO3 check done"); }
+    catch (e) { toast(e.message, true); el.disabled = false; }
+  },
+  async tokentest() { try { toast((await api("/api/token/test", {})).msg); } catch (e) { toast(e.message, true); } },
+  async tokendel() {
+    if (!confirm("Remove the stored GitLab token?")) return;
+    try { await api("/api/token/delete", {}); await refresh(); viewSettings(); toast("Token removed"); } catch (e) { toast(e.message, true); }
+  },
+};
+document.addEventListener("click", e => {
+  const el = e.target.closest("[data-act]");
+  if (el && actions[el.dataset.act]) { e.preventDefault(); actions[el.dataset.act](el); }
+});
+
+window.addEventListener("hashchange", render);
+render();
+setInterval(async () => {          // refresh list views only; never interrupt forms or pipeline view
+  const h = location.hash.slice(1) || "/";
+  await refresh();
+  if (h === "/" ) viewProjects(); else if (h === "/activity") viewActivity();
+}, 30000);
+</script>
+</body>
+</html>

@@ -1,1 +1,7 @@
- 
+.gitlab-token
+state.json
+launcher.log
+*.tmp
+__pycache__/
+config.json
+.idea/
