@@ -100,15 +100,34 @@ Open <http://127.0.0.1:8787>. `config.json`, `state.json` and `.gitlab-token` ar
 | Restart | `docker compose restart` |
 | Stop | `docker compose down` |
 
+### Local hostname with HTTPS (optional)
+
+Serve the app at <https://local-gitlabrunner.local> with a trusted [mkcert](https://github.com/FiloSottile/mkcert) certificate:
+
+```bash
+brew install mkcert && mkcert -install          # once: local CA (asks for password)
+mkdir -p certs
+mkcert -cert-file certs/local-gitlabrunner.local.pem \
+       -key-file certs/local-gitlabrunner.local-key.pem local-gitlabrunner.local
+echo "127.0.0.1 local-gitlabrunner.local" | sudo tee -a /etc/hosts
+echo "::1 local-gitlabrunner.local" | sudo tee -a /etc/hosts   # avoids 5 s .local lookup delay
+docker compose up -d --build
+```
+
+- `certs/` is gitignored; the certificate is valid for ~2 years, re-run the `mkcert` command to renew
+- Without the certificate files HTTPS is skipped and the app runs on http://127.0.0.1:8787 only
+- Firefox may need `mkcert -install` again (own certificate store)
+
 Notes:
-- Port is published on `127.0.0.1` only. Host port must match `port` in `config.json` (default `8787`), otherwise the Host header check rejects requests.
+- Ports are published on `127.0.0.1` only. Host port must match `port` in `config.json` (default `8787`), otherwise the Host header check rejects requests.
 - Stop any copy of `app.py` running in a terminal first (same port).
 - macOS notifications (TYPO3 auto-trigger) do not work inside the container; see the Activity log instead.
-- Environment: `LAUNCHER_DATA` (data folder, default: app folder), `LAUNCHER_HOST` (bind address, default `127.0.0.1`).
+- Environment: `LAUNCHER_DATA` (data folder, default: app folder), `LAUNCHER_HOST` (bind address, default `127.0.0.1`), `LAUNCHER_ALLOWED_HOSTS` (extra accepted hostnames, comma-separated), `LAUNCHER_TLS_CERT` / `LAUNCHER_TLS_KEY` / `LAUNCHER_TLS_PORT` (HTTPS listener, default port `8443`).
 
 ## Security
 
-- Binds to `127.0.0.1` only
+- Binds to `127.0.0.1` only (Docker: published on `127.0.0.1` only)
+- Optional HTTPS with a local mkcert certificate
 - `Host` header check against DNS rebinding
 - `Origin` check and `application/json` requirement on POST against cross-site requests
 - Token, config, state and logs are gitignored
@@ -121,6 +140,7 @@ Notes:
 | `index.html` | Web UI |
 | `config.example.json` | Example configuration |
 | `Dockerfile`, `compose.yaml` | Docker setup |
+| `certs/` | mkcert certificate + key (gitignored) |
 | `config.json` | Your configuration (gitignored) |
 | `state.json` | Runs, log, TYPO3 baselines (gitignored) |
 | `.gitlab-token` | GitLab token (gitignored) |

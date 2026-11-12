@@ -5,3 +5,4 @@ launcher.log
 __pycache__/
 config.json
 .idea/
+certs/

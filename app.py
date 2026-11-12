@@ -9,6 +9,7 @@
 import datetime
 import json
 import os
+import ssl
 import subprocess
 import sys
 import threading
@@ -26,6 +27,12 @@ STATE = DATA / "state.json"
 TOKEN_FILE = DATA / ".gitlab-token"              # stored by the app (chmod 600)
 TOKEN_FALLBACK = Path.home() / ".gitlab-token"     # optional fallback
 HOST = os.environ.get("LAUNCHER_HOST", "127.0.0.1")  # Docker: 0.0.0.0, published on 127.0.0.1 only
+# extra Host header values, e.g. "local-gitlabrunner.local" (Docker publishes it on port 80)
+ALLOWED_HOSTS = {h.strip() for h in os.environ.get("LAUNCHER_ALLOWED_HOSTS", "").split(",") if h.strip()}
+# optional HTTPS listener (e.g. mkcert certificate); runs in addition to plain HTTP
+TLS_CERT = os.environ.get("LAUNCHER_TLS_CERT")
+TLS_KEY = os.environ.get("LAUNCHER_TLS_KEY")
+TLS_PORT = int(os.environ.get("LAUNCHER_TLS_PORT", 8443))
 TYPO3_API = "https://get.typo3.org/api/v1/major/{major}/release/latest"
 
 lock = threading.RLock()
@@ -246,7 +253,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _allowed(self):
         port = self.server.server_address[1]
-        ok = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        ok = {f"127.0.0.1:{port}", f"localhost:{port}"} | ALLOWED_HOSTS
         if self.headers.get("Host") not in ok:          # DNS rebinding
             return False
         origin = self.headers.get("Origin")
@@ -435,6 +442,15 @@ def main():
     if "--no-watch" not in sys.argv:
         threading.Thread(target=watcher, daemon=True).start()
     print(f"GitLab Launcher: http://{HOST}:{port}", flush=True)
+    if TLS_CERT and TLS_KEY and not (Path(TLS_CERT).exists() and Path(TLS_KEY).exists()):
+        print(f"HTTPS disabled: certificate not found ({TLS_CERT})", flush=True)
+    elif TLS_CERT and TLS_KEY:
+        ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+        tls = ThreadingHTTPServer((HOST, TLS_PORT), Handler)
+        tls.socket = ctx.wrap_socket(tls.socket, server_side=True)
+        threading.Thread(target=tls.serve_forever, daemon=True).start()
+        print(f"GitLab Launcher: https://{HOST}:{TLS_PORT}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

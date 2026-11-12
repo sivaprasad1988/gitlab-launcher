@@ -4,8 +4,12 @@ services:
     container_name: gitlab-launcher
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8787:8787"   # host port must match "port" in config.json (Host header check)
+      - "127.0.0.1:8787:8787"   # http://127.0.0.1:8787 (must match "port" in config.json)
+      - "127.0.0.1:443:8443"    # https://local-gitlabrunner.local (needs /etc/hosts entry + mkcert cert in ./certs)
     environment:
       TZ: Europe/Berlin
+      LAUNCHER_ALLOWED_HOSTS: local-gitlabrunner.local
+      LAUNCHER_TLS_CERT: /data/certs/local-gitlabrunner.local.pem
+      LAUNCHER_TLS_KEY: /data/certs/local-gitlabrunner.local-key.pem
     volumes:
       - ./:/data                # config.json, state.json, .gitlab-token stay in this folder
