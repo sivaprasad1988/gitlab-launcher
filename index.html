@@ -156,7 +156,9 @@ function viewProjects() {
   }).join("");
   $("#view").innerHTML = `
     <div class="head"><div><h1>Projects</h1><div class="sub">${S.projects.length} project(s)</div></div>
-      <a class="btn" href="#/new">+ New project</a></div>
+      <div class="actions">
+        ${S.projects.length ? `<button class="btn" data-act="runall">▶ Run all</button>` : ""}
+        <a class="btn sec" href="#/new">+ New project</a></div></div>
     ${cards ? `<div class="grid">${cards}</div>` : `<div class="card empty">No projects yet. <a href="#/new">Create one</a>.</div>`}`;
 }
 
@@ -185,6 +187,9 @@ function viewProject(p, pipelineId) {
           <dt>Auto-play</dt><dd>${esc((p.auto_play || []).join(", ")) || "–"}</dd>
           <dt>TYPO3 auto</dt><dd>${a.enabled ? `on · v${esc(a.major)} · seen ${esc(S.typo3_seen[p.id] || "–")}` : "off"}</dd>
           ${a.enabled ? `<dt>Update vars</dt><dd>${esc(varsStr(a.variables)) || "–"}</dd>` : ""}
+          <dt>Production</dt><dd>${p.production?.ref ? `<code>${esc(p.production.ref)}</code>` : "–"}</dd>
+          ${p.production?.ref ? `<dt>Prod vars</dt><dd>${esc(varsStr(p.production.variables)) || "–"}</dd>
+          <dt>Prod auto-play</dt><dd>${esc((p.production.auto_play || []).join(", ")) || "–"}</dd>` : ""}
         </dl></div>
         <div class="card"><h2>Recent runs</h2><div class="runs">
           ${runs.map(r => `<a href="${pUrl(p)}/pl/${Number(r.pipeline)}" class="${r.pipeline === pid ? "on" : ""}">
@@ -212,7 +217,9 @@ async function loadPipeline(p, pid) {
         <td><span class="st s-${esc(j.status)}">${esc(j.status)}</span></td>
         <td>${j.status === "manual" ? `<button class="btn sm" data-act="play" data-job="${Number(j.id)}" data-name="${esc(j.name)}">▶ Play</button>` : ""}</td></tr>`).join("")
         || `<tr><td colspan="4" class="empty">No jobs.</td></tr>`}
-      </tbody></table></div>`;
+      </tbody></table></div>
+      ${p.production?.ref && d.pipeline.ref === p.ref && d.pipeline.status === "success"
+        ? `<div class="actions" style="margin-top:12px"><button class="btn" data-act="promote" data-from="${Number(pid)}">🚀 Promote to production (${esc(p.production.ref)})</button></div>` : ""}`;
     if (ACTIVE.includes(d.pipeline.status)) pollT = setTimeout(() => loadPipeline(p, pid), 5000);
   } catch (e) { if ($("#pipe")) $("#pipe").innerHTML = `<p class="empty">Error: ${esc(e.message)}</p>`; }
 }
@@ -227,7 +234,8 @@ function viewForm(p) {
         <div><label>Name</label><input name="name" value="${esc(p?.name)}" placeholder="WVG Online"></div>
         <div><label>GitLab URL</label><input name="gitlab_url" value="${esc(p?.gitlab_url || "https://gitlab.gingco.de")}"></div>
         <div><label>Project path *</label><input name="path" value="${esc(p?.path)}" placeholder="group/project" required></div>
-        <div><label>Branch *</label><input name="ref" value="${esc(p?.ref)}" placeholder="staging" required></div>
+        <div><label>Branch *</label><input name="ref" value="${esc(p?.ref)}" placeholder="staging" list="branchlist" required></div>
+        <datalist id="branchlist"></datalist>
       </div></div>
       <div class="card"><div class="sec-title">Run pipeline</div><div class="fields">
         <div><label>Variables</label><input name="variables" value="${esc(varsStr(p?.variables))}" placeholder="KEY=VALUE, KEY2=VALUE2"></div>
@@ -241,16 +249,43 @@ function viewForm(p) {
           <div><label>Update variables</label><input name="auto_variables" value="${esc(varsStr(a.variables))}"></div>
           <div><label>Auto-play jobs (update)</label><input name="auto_typo3_play" value="${esc((a.auto_play || []).join(", "))}"></div>
         </div></div>
+      <div class="card"><div class="sec-title">Production (promote)</div><div class="fields">
+        <div><label>Production branch</label><input name="prod_ref" value="${esc(p?.production?.ref)}" placeholder="production" list="branchlist">
+          <div class="hint">Empty = no promote. Button appears after a successful pipeline on the branch above.</div></div>
+        <div><label>Variables</label><input name="prod_variables" value="${esc(varsStr(p?.production?.variables))}" placeholder="KEY=VALUE"></div>
+        <div><label>Auto-play manual jobs</label><input name="prod_play" value="${esc((p?.production ? p.production.auto_play || [] : p?.auto_play || []).join(", "))}">
+          <div class="hint">Pre-filled from the jobs above; edit to differ.</div></div>
+      </div></div>
       <div class="actions"><button class="btn" type="submit">${p ? "Save changes" : "Create project"}</button>
         <a class="btn sec" href="${p ? pUrl(p) : "#/"}">Cancel</a></div>
     </form>`;
+  const fm = $("#pform"), sp = fm.elements.auto_play, pp = fm.elements.prod_play, pr = fm.elements.prod_ref;
+  let prodTouched = !!(p && p.production);       // saved production config is never overwritten
+  pr.addEventListener("input", () => { prodTouched = true; });
+  async function loadBranches() {                // GitLab branches -> suggestions + prefill production branch
+    const url = fm.elements.gitlab_url.value.trim(), path = fm.elements.path.value.trim();
+    if (!url || !path) return;
+    try {
+      const d = await api(`/api/branches?gitlab_url=${encodeURIComponent(url)}&path=${encodeURIComponent(path)}`);
+      $("#branchlist").innerHTML = d.branches.map(b => `<option value="${esc(b)}">`).join("");
+      const guess = d.branches.includes("production") ? "production" : d.default;
+      if (!prodTouched && guess && guess !== fm.elements.ref.value.trim()) pr.value = guess;
+    } catch (e) { /* lookup is optional; field stays editable */ }
+  }
+  fm.elements.path.addEventListener("change", loadBranches);
+  fm.elements.gitlab_url.addEventListener("change", loadBranches);
+  loadBranches();
+  let synced = pp.value === sp.value;            // mirror staging jobs until prod field is edited by hand
+  sp.addEventListener("input", () => { if (synced) pp.value = sp.value; });
+  pp.addEventListener("input", () => { synced = pp.value === sp.value; });
   $("#pform").onsubmit = async ev => {
     ev.preventDefault();
     const f = new FormData(ev.target);
     const body = {name:f.get("name"), gitlab_url:f.get("gitlab_url"), path:f.get("path"), ref:f.get("ref"),
       variables:parseVars(f.get("variables")), auto_play:f.get("auto_play"),
       auto_enabled:f.get("auto_enabled") === "on", major:f.get("major"),
-      auto_variables:parseVars(f.get("auto_variables")), auto_typo3_play:f.get("auto_typo3_play")};
+      auto_variables:parseVars(f.get("auto_variables")), auto_typo3_play:f.get("auto_typo3_play"),
+      prod_ref:f.get("prod_ref"), prod_variables:parseVars(f.get("prod_variables")), prod_play:f.get("prod_play")};
     try {
       const saved = p ? await api("/api/projects/update", {...body, id:p.id}) : await api("/api/projects", body);
       await refresh(); toast(p ? "Project saved" : "Project created"); location.hash = pUrl(saved);
@@ -310,6 +345,24 @@ const actions = {
     el.disabled = true;
     try { const r = await api("/api/run", {project:p.id, mode:el.dataset.mode}); await refresh();
       toast(`Pipeline #${r.id} started`); location.hash = `${pUrl(p)}/pl/${r.id}`; }
+    catch (e) { toast(e.message, true); el.disabled = false; }
+  },
+  async runall(el) {
+    const ps = S.projects;
+    if (!confirm(`Start pipelines for all ${ps.length} project(s) at once?\n\n` + ps.map(p => `• ${p.name} (${p.ref})`).join("\n"))) return;
+    el.disabled = true;
+    const res = await Promise.allSettled(ps.map(p => api("/api/run", {project:p.id, mode:"normal"})));
+    const failed = res.map((r, i) => r.status === "rejected" ? `${ps[i].name}: ${r.reason.message}` : null).filter(Boolean);
+    await refresh(); viewProjects();
+    if (failed.length) toast(`${ps.length - failed.length}/${ps.length} started. Failed: ${failed.join(" | ")}`, true);
+    else toast(`${ps.length} pipeline(s) started`);
+  },
+  async promote(el) {
+    const p = proj($("#view").dataset.project), from = Number(el.dataset.from), ref = p.production.ref;
+    if (!confirm(`PRODUCTION: start pipeline for ${p.name} on "${ref}"?\n\nStaging pipeline #${from} succeeded.\nMake sure "${ref}" already contains the staging changes (merged in GitLab) — the launcher does not merge.`)) return;
+    el.disabled = true;
+    try { const r = await api("/api/run", {project:p.id, mode:"promote", from}); await refresh();
+      toast(`Production pipeline #${r.id} started`); location.hash = `${pUrl(p)}/pl/${r.id}`; }
     catch (e) { toast(e.message, true); el.disabled = false; }
   },
   async play(el) {

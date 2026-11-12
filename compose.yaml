@@ -1,0 +1,11 @@
+services:
+  launcher:
+    build: .
+    container_name: gitlab-launcher
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"   # host port must match "port" in config.json (Host header check)
+    environment:
+      TZ: Europe/Berlin
+    volumes:
+      - ./:/data                # config.json, state.json, .gitlab-token stay in this folder

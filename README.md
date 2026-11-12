@@ -8,6 +8,8 @@ Pure Python standard library, no dependencies. Runs on `127.0.0.1` only.
 
 - **Project list** — GitLab projects (path + branch) managed in the UI, stored in `config.json`
 - **Run pipelines** — normal run or "TYPO3 update" run, each with its own CI variables
+- **Run all** — start the normal pipeline of every project at once (one confirmation, failures reported per project)
+- **Promote to production** — after a successful pipeline on the staging branch, start a pipeline on the production branch (see below)
 - **Job view** — pipeline status and jobs; play manual jobs with one click
 - **Auto-play** — listed manual jobs (e.g. `build:main`) are started automatically once they become playable (polled every 15 s, max. 2 h)
 - **TYPO3 watcher** — checks `get.typo3.org` for the latest release of a major version every `check_interval_hours`; on a new version it triggers the pipeline of every project with `auto_typo3.enabled` and shows a macOS notification
@@ -19,7 +21,8 @@ Pure Python standard library, no dependencies. Runs on `127.0.0.1` only.
 
 - Python 3 (stdlib only)
 - GitLab personal access token with `api` scope
-- macOS for notifications and the LaunchAgent (the app itself runs anywhere)
+- Docker (recommended) — or run directly with Python
+- macOS for notifications (only when not running in Docker)
 
 ## Quick start
 
@@ -27,15 +30,16 @@ Pure Python standard library, no dependencies. Runs on `127.0.0.1` only.
 git clone git@github.com:sivaprasad1988/gitlab-launcher.git
 cd gitlab-launcher
 cp config.example.json config.json   # optional — projects can also be added in the UI
-python3 app.py
+docker compose up -d --build         # runs permanently, see "Run with Docker"
 ```
 
-Open <http://127.0.0.1:8787>, save your GitLab token in the *GitLab token* section, add projects.
+Open <http://127.0.0.1:8787>, save your GitLab token in *Settings → GitLab token*, add projects.
 
-Start without the TYPO3 watcher:
+Without Docker (runs only while the terminal is open):
 
 ```bash
-python3 app.py --no-watch
+python3 app.py               # with TYPO3 watcher
+python3 app.py --no-watch    # without TYPO3 watcher
 ```
 
 ## Configuration
@@ -57,8 +61,20 @@ python3 app.py --no-watch
 | `projects[].auto_typo3.major` | TYPO3 major version to watch, e.g. `13` |
 | `projects[].auto_typo3.variables` | CI variables for a TYPO3 update run |
 | `projects[].auto_typo3.auto_play` | Manual jobs to auto-play after a TYPO3 update run |
+| `projects[].production.ref` | Production branch; empty = no promote button |
+| `projects[].production.variables` | CI variables for the production run |
+| `projects[].production.auto_play` | Manual jobs to auto-play after the production run |
 
 Changing a project's TYPO3 major resets its baseline (no immediate trigger).
+
+## Promote to production
+
+1. Run the staging pipeline (**▶ Run pipeline** or **▶ Run all**) and wait for `success`.
+2. Merge `staging` into the production branch **in GitLab** — the launcher does not merge.
+3. Open the successful staging pipeline in the launcher and click **🚀 Promote to production**.
+4. The server re-checks via GitLab that the source pipeline is a successful staging pipeline, then starts a pipeline on the production branch with the production variables and auto-play jobs.
+
+In the project form, the production branch is pre-filled from GitLab (`production` if it exists, otherwise the default branch) and the production auto-play jobs mirror the staging ones until edited. Run all and the TYPO3 auto-trigger never touch production.
 
 ## GitLab token
 
@@ -67,22 +83,28 @@ Changing a project's TYPO3 major resets its baseline (no immediate trigger).
 - Read server-side only, never sent to the browser
 - Can be tested and removed in the UI
 
-## Run as macOS LaunchAgent
+## Run with Docker (always on)
 
-`de.gingco.gitlab-launcher.plist` starts the app at login and keeps it running. Adjust the paths in the plist (Python binary, `app.py`, working directory, log file) to your setup, then:
-
-```bash
-cp de.gingco.gitlab-launcher.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/de.gingco.gitlab-launcher.plist
-```
-
-Stop / remove:
+The container restarts automatically (`restart: unless-stopped`), also after a reboot as long as Docker Desktop starts at login (*Docker Desktop → Settings → General → Start Docker Desktop when you sign in*).
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/de.gingco.gitlab-launcher.plist
+docker compose up -d --build
 ```
 
-Output goes to `launcher.log`.
+Open <http://127.0.0.1:8787>. `config.json`, `state.json` and `.gitlab-token` are read from and written to this folder (mounted as `/data`), so they survive rebuilds.
+
+| Task | Command |
+|---|---|
+| Update after code changes | `docker compose up -d --build` |
+| Logs | `docker compose logs -f` |
+| Restart | `docker compose restart` |
+| Stop | `docker compose down` |
+
+Notes:
+- Port is published on `127.0.0.1` only. Host port must match `port` in `config.json` (default `8787`), otherwise the Host header check rejects requests.
+- Stop any copy of `app.py` running in a terminal first (same port).
+- macOS notifications (TYPO3 auto-trigger) do not work inside the container; see the Activity log instead.
+- Environment: `LAUNCHER_DATA` (data folder, default: app folder), `LAUNCHER_HOST` (bind address, default `127.0.0.1`).
 
 ## Security
 
@@ -98,8 +120,7 @@ Output goes to `launcher.log`.
 | `app.py` | Server, GitLab API client, TYPO3 watcher |
 | `index.html` | Web UI |
 | `config.example.json` | Example configuration |
-| `de.gingco.gitlab-launcher.plist` | macOS LaunchAgent |
+| `Dockerfile`, `compose.yaml` | Docker setup |
 | `config.json` | Your configuration (gitignored) |
 | `state.json` | Runs, log, TYPO3 baselines (gitignored) |
 | `.gitlab-token` | GitLab token (gitignored) |
-| `launcher.log` | LaunchAgent output (gitignored) |

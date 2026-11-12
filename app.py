@@ -20,11 +20,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
-CONFIG = BASE / "config.json"
-STATE = BASE / "state.json"
-TOKEN_FILE = BASE / ".gitlab-token"              # stored by the app (chmod 600)
+DATA = Path(os.environ.get("LAUNCHER_DATA", BASE))  # config/state/token location (Docker: /data)
+CONFIG = DATA / "config.json"
+STATE = DATA / "state.json"
+TOKEN_FILE = DATA / ".gitlab-token"              # stored by the app (chmod 600)
 TOKEN_FALLBACK = Path.home() / ".gitlab-token"     # optional fallback
-HOST = "127.0.0.1"
+HOST = os.environ.get("LAUNCHER_HOST", "127.0.0.1")  # Docker: 0.0.0.0, published on 127.0.0.1 only
 TYPO3_API = "https://get.typo3.org/api/v1/major/{major}/release/latest"
 
 lock = threading.RLock()
@@ -159,18 +160,19 @@ def auto_play(project, pipeline_id, job_names, timeout=7200):
         log(f"Auto-play: not started in pipeline #{pipeline_id}: {', '.join(sorted(names))}")
 
 
-def run_pipeline(project, variables, trigger, play_jobs=()):
-    body = {"ref": project["ref"],
+def run_pipeline(project, variables, trigger, play_jobs=(), ref=None):
+    ref = ref or project["ref"]
+    body = {"ref": ref,
             "variables": [{"key": k, "value": str(v)} for k, v in variables.items()]}
     p = gitlab(project, "POST", "/pipeline", body)
     with lock:
         st = load(STATE, {})
         st.setdefault("runs", []).insert(0, {
             "t": now(), "project": project["id"], "pipeline": p["id"],
-            "web_url": p.get("web_url"), "trigger": trigger})
+            "web_url": p.get("web_url"), "trigger": trigger, "ref": ref})
         del st["runs"][100:]
         save(STATE, st)
-    log(f"Pipeline #{p['id']} started: {project['path']} @ {project['ref']} ({trigger})")
+    log(f"Pipeline #{p['id']} started: {project['path']} @ {ref} ({trigger})")
     if play_jobs:
         threading.Thread(target=auto_play, args=(project, p["id"], list(play_jobs)), daemon=True).start()
     return p
@@ -280,6 +282,8 @@ class Handler(BaseHTTPRequestHandler):
                     "typo3_seen": st.get("typo3_seen", {}),
                     "runs": st.get("runs", [])[:30],
                     "log": st.get("log", [])[:50]})
+            if u.path == "/api/branches":
+                return self._send(200, branches(q["gitlab_url"][0], q["path"][0]))
             if u.path == "/api/pipeline":
                 p = find_project(q["project"][0])
                 pid = int(q["id"][0])
@@ -299,6 +303,8 @@ class Handler(BaseHTTPRequestHandler):
             path = self.path
             if path == "/api/run":
                 p = find_project(body["project"])
+                if body.get("mode") == "promote":
+                    return self._send(200, promote(p, int(body["from"])))
                 src = p.get("auto_typo3", {}) if body.get("mode") == "update" else p
                 trig = "manual TYPO3 update" if body.get("mode") == "update" else "manual"
                 return self._send(200, run_pipeline(p, src.get("variables", {}), trig,
@@ -336,6 +342,30 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": str(e)})
 
 
+def branches(gitlab_url, path):
+    """Branch names + default branch. Only known GitLab hosts (token must not go elsewhere)."""
+    url = gitlab_url.strip().rstrip("/")
+    known = {p["gitlab_url"].rstrip("/") for p in config()["projects"]} | {"https://gitlab.gingco.de"}
+    if url not in known:
+        raise RuntimeError(f"Unknown GitLab host: {url}")
+    p = {"gitlab_url": url, "path": path.strip().strip("/")}
+    return {"default": gitlab(p, "GET", "")["default_branch"],
+            "branches": [b["name"] for b in gitlab(p, "GET", "/repository/branches?per_page=100")]}
+
+
+def promote(project, source_id):
+    """Run the production pipeline, only after a successful staging pipeline."""
+    prod = project.get("production") or {}
+    if not prod.get("ref"):
+        raise RuntimeError("No production branch configured for this project")
+    src = gitlab(project, "GET", f"/pipelines/{source_id}")
+    if src.get("ref") != project["ref"] or src.get("status") != "success":
+        raise RuntimeError(f"Pipeline #{source_id} is not a successful '{project['ref']}' pipeline "
+                           f"(ref '{src.get('ref')}', status '{src.get('status')}')")
+    return run_pipeline(project, prod.get("variables", {}), f"promote #{source_id} -> {prod['ref']}",
+                        prod.get("auto_play", []), ref=prod["ref"])
+
+
 def _jobs(v):
     if isinstance(v, list):
         return [s.strip() for s in v if str(s).strip()]
@@ -359,7 +389,11 @@ def build_project(b, pid=None):
             "enabled": bool(b.get("auto_enabled")),
             "major": int(b.get("major") or 13),
             "variables": b.get("auto_variables") or {},
-            "auto_play": _jobs(b.get("auto_typo3_play"))}}
+            "auto_play": _jobs(b.get("auto_typo3_play"))},
+        "production": {
+            "ref": (b.get("prod_ref") or "").strip(),
+            "variables": b.get("prod_variables") or {},
+            "auto_play": _jobs(b.get("prod_play"))}}
 
 
 def update_project(b):
