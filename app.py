@@ -33,6 +33,7 @@ ALLOWED_HOSTS = {h.strip() for h in os.environ.get("LAUNCHER_ALLOWED_HOSTS", "")
 TLS_CERT = os.environ.get("LAUNCHER_TLS_CERT")
 TLS_KEY = os.environ.get("LAUNCHER_TLS_KEY")
 TLS_PORT = int(os.environ.get("LAUNCHER_TLS_PORT", 8443))
+tls_on = False  # set in main() once the HTTPS listener runs
 TYPO3_API = "https://get.typo3.org/api/v1/major/{major}/release/latest"
 
 lock = threading.RLock()
@@ -261,6 +262,17 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _to_https(self):
+        """Plain HTTP on an extra hostname -> redirect to HTTPS (127.0.0.1/localhost stay plain)."""
+        host = self.headers.get("Host", "")
+        if not tls_on or isinstance(self.connection, ssl.SSLSocket) or host not in ALLOWED_HOSTS:
+            return False
+        self.send_response(301 if self.command == "GET" else 308)
+        self.send_header("Location", f"https://{host.split(':')[0]}{self.path}")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return True
+
     def _send(self, code, data, ctype="application/json"):
         body = data if isinstance(data, bytes) else json.dumps(data).encode()
         self.send_response(code)
@@ -273,6 +285,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._allowed():
             return self._send(403, {"error": "forbidden"})
+        if self._to_https():
+            return
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
         try:
@@ -304,6 +318,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._allowed() or not self.headers.get("Content-Type", "").startswith("application/json"):
             return self._send(403, {"error": "forbidden"})
+        if self._to_https():
+            return
         try:
             n = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(n) or b"{}")
@@ -450,6 +466,8 @@ def main():
         tls = ThreadingHTTPServer((HOST, TLS_PORT), Handler)
         tls.socket = ctx.wrap_socket(tls.socket, server_side=True)
         threading.Thread(target=tls.serve_forever, daemon=True).start()
+        global tls_on
+        tls_on = True
         print(f"GitLab Launcher: https://{HOST}:{TLS_PORT}", flush=True)
     try:
         srv.serve_forever()

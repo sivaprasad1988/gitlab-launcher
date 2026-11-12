@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8787:8787"   # http://127.0.0.1:8787 (must match "port" in config.json)
+      - "127.0.0.1:80:8787"     # http://local-gitlabrunner.local -> redirects to https
       - "127.0.0.1:443:8443"    # https://local-gitlabrunner.local (needs /etc/hosts entry + mkcert cert in ./certs)
     environment:
       TZ: Europe/Berlin

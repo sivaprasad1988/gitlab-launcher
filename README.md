@@ -114,6 +114,7 @@ echo "::1 local-gitlabrunner.local" | sudo tee -a /etc/hosts   # avoids 5 s .loc
 docker compose up -d --build
 ```
 
+- http://local-gitlabrunner.local redirects to https (http://127.0.0.1:8787 stays plain HTTP as fallback)
 - `certs/` is gitignored; the certificate is valid for ~2 years, re-run the `mkcert` command to renew
 - Without the certificate files HTTPS is skipped and the app runs on http://127.0.0.1:8787 only
 - Firefox may need `mkcert -install` again (own certificate store)
