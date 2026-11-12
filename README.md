@@ -7,6 +7,7 @@ Pure Python standard library, no dependencies. Runs on `127.0.0.1` only.
 ## Features
 
 - **Project list** — GitLab projects (path + branch) managed in the UI, stored in `config.json`
+- **Project form pre-fill** — new projects start with defaults (staging/production, `build:main`, TYPO3 13, `TARGET_TASK_NAME=shup01`); branch, production branch and TYPO3 major are select boxes; when GitLab is reachable, project path search plus name, branches, manual jobs (CI lint) and TYPO3 major are read from GitLab
 - **Run pipelines** — normal run or "TYPO3 update" run, each with its own CI variables
 - **Run all** — start the normal pipeline of every project at once (one confirmation, failures reported per project)
 - **Promote to production** — after a successful pipeline on the staging branch, start a pipeline on the production branch (see below)
@@ -95,7 +96,7 @@ Open <http://127.0.0.1:8787>. `config.json`, `state.json` and `.gitlab-token` ar
 
 | Task | Command |
 |---|---|
-| Update after code changes | `docker compose up -d --build` |
+| Update after code changes (`app.py` or `index.html`) | `docker compose up -d --build` |
 | Logs | `docker compose logs -f` |
 | Restart | `docker compose restart` |
 | Stop | `docker compose down` |

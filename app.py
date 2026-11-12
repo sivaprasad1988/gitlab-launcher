@@ -9,6 +9,7 @@
 import datetime
 import json
 import os
+import re
 import ssl
 import subprocess
 import sys
@@ -135,6 +136,8 @@ def gitlab(project, method, path, body=None):
             return json.loads(raw) if raw else None
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:500]
+        if detail.lstrip().startswith("<"):          # HTML error page (proxy/auth) -> status only
+            detail = e.reason
         raise RuntimeError(f"GitLab HTTP {e.code}: {detail}") from None
     except urllib.error.URLError as e:
         raise RuntimeError(f"GitLab not reachable: {e.reason}") from None
@@ -303,8 +306,10 @@ class Handler(BaseHTTPRequestHandler):
                     "typo3_seen": st.get("typo3_seen", {}),
                     "runs": st.get("runs", [])[:30],
                     "log": st.get("log", [])[:50]})
-            if u.path == "/api/branches":
-                return self._send(200, branches(q["gitlab_url"][0], q["path"][0]))
+            if u.path == "/api/project-info":
+                return self._send(200, project_info(q["gitlab_url"][0], q["path"][0], q.get("ref", [""])[0]))
+            if u.path == "/api/search":
+                return self._send(200, search_projects(q["gitlab_url"][0], q["q"][0]))
             if u.path == "/api/pipeline":
                 p = find_project(q["project"][0])
                 pid = int(q["id"][0])
@@ -365,15 +370,59 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": str(e)})
 
 
-def branches(gitlab_url, path):
-    """Branch names + default branch. Only known GitLab hosts (token must not go elsewhere)."""
-    url = gitlab_url.strip().rstrip("/")
+def known_host(gitlab_url):
+    """Only known GitLab hosts -- the token must not be sent anywhere else."""
+    url = (gitlab_url or "").strip().rstrip("/")
     known = {p["gitlab_url"].rstrip("/") for p in config()["projects"]} | {"https://gitlab.gingco.de"}
     if url not in known:
         raise RuntimeError(f"Unknown GitLab host: {url}")
-    p = {"gitlab_url": url, "path": path.strip().strip("/")}
-    return {"default": gitlab(p, "GET", "")["default_branch"],
-            "branches": [b["name"] for b in gitlab(p, "GET", "/repository/branches?per_page=100")]}
+    return url
+
+
+def gitlab_get(url, path):
+    req = urllib.request.Request(url + "/api/v4" + path, headers={"PRIVATE-TOKEN": token()})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r)
+
+
+def search_projects(gitlab_url, q):
+    url = known_host(gitlab_url)
+    res = gitlab_get(url, "/projects?membership=true&simple=true&per_page=20&order_by=last_activity_at&search="
+                     + urllib.parse.quote(q))
+    return [{"path": x["path_with_namespace"], "name": x["name"]} for x in res]
+
+
+def manual_jobs(project, ref):
+    """Manual jobs of the CI config on ref (GitLab CI lint dry run)."""
+    try:
+        r = gitlab(project, "GET", "/ci/lint?dry_run=true&include_jobs=true&ref=" + urllib.parse.quote(ref, safe=""))
+        return [j["name"] for j in r.get("jobs", []) if j.get("when") == "manual"]
+    except Exception:
+        return []
+
+
+def typo3_major(project, ref):
+    """Most frequent major of "typo3/cms-core" constraints in the repo (blob search), or None."""
+    try:
+        hits = gitlab(project, "GET", "/search?scope=blobs&search=" + urllib.parse.quote("typo3/cms-core")
+                      + "&ref=" + urllib.parse.quote(ref, safe=""))
+    except Exception:
+        return None
+    majors = [int(m) for h in hits for m in re.findall(r'"typo3/cms-core"\s*:\s*"[^0-9"]*(\d+)', h.get("data", ""))]
+    return max(set(majors), key=majors.count) if majors else None
+
+
+def project_info(gitlab_url, path, ref=""):
+    """Everything the project form can pre-fill, read from GitLab."""
+    p = {"gitlab_url": known_host(gitlab_url), "path": path.strip().strip("/")}
+    info = gitlab(p, "GET", "")
+    branches = [b["name"] for b in gitlab(p, "GET", "/repository/branches?per_page=100")]
+    default = info.get("default_branch")
+    ref = ref.strip() or ("staging" if "staging" in branches else default)
+    prod = "production" if "production" in branches else (default if default != ref else "")
+    return {"name": info.get("name"), "default": default, "branches": branches, "ref": ref,
+            "auto_play": manual_jobs(p, ref), "prod_ref": prod,
+            "prod_play": manual_jobs(p, prod) if prod else [], "major": typo3_major(p, ref)}
 
 
 def promote(project, source_id):

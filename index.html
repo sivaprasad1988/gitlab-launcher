@@ -64,8 +64,8 @@ dt{color:var(--mut)}dd{margin:0;word-break:break-word}
 form .sec-title{font-weight:600;margin:4px 0 10px}
 .fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
 label{display:block;font-size:12px;color:var(--mut);margin-bottom:4px}
-input{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:8px 10px;font-size:13px}
-input:focus{outline:2px solid var(--acc);outline-offset:-1px}
+input,select{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:8px 10px;font-size:13px}
+input:focus,select:focus{outline:2px solid var(--acc);outline-offset:-1px}
 .check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--fg)}
 .check input{width:auto}
 .hint{font-size:12px;color:var(--mut);margin-top:4px}
@@ -224,60 +224,98 @@ async function loadPipeline(p, pid) {
   } catch (e) { if ($("#pipe")) $("#pipe").innerHTML = `<p class="empty">Error: ${esc(e.message)}</p>`; }
 }
 
+// Branch select options: staging/production + GitLab branches + current value
+function branchOpts(list, cur, allowNone) {
+  const names = [...new Set(["staging", "production", ...list, ...(cur ? [cur] : [])])];
+  return (allowNone ? `<option value="" ${cur ? "" : "selected"}>– none (no promote) –</option>` : "")
+    + names.map(b => `<option value="${esc(b)}" ${b === cur ? "selected" : ""}>${esc(b)}</option>`).join("");
+}
+
+// Defaults for a new project (work without GitLab; GitLab lookup may refine them)
+const DEFAULTS = {gitlab_url:"https://gitlab.gingco.de", ref:"staging", variables:{}, auto_play:["build:main"],
+  auto_typo3:{enabled:true, major:13, variables:{TARGET_TASK_NAME:"shup01"}, auto_play:[]},
+  production:{ref:"production", variables:{}, auto_play:["build:main"]}};
+
 function viewForm(p) {
-  const a = (p && p.auto_typo3) || {enabled:false, major:13, variables:{TARGET_TASK_NAME:"shup01"}, auto_play:[]};
+  const v = p || DEFAULTS, a = v.auto_typo3 || DEFAULTS.auto_typo3;
   $("#view").innerHTML = `
     <div class="crumb"><a href="#/">Projects</a> / ${p ? `<a href="${pUrl(p)}">${esc(p.name)}</a> / Edit` : "New project"}</div>
     <div class="head"><h1>${p ? "Edit project" : "New project"}</h1></div>
     <form id="pform" class="stack">
       <div class="card"><div class="sec-title">Basics</div><div class="fields">
         <div><label>Name</label><input name="name" value="${esc(p?.name)}" placeholder="WVG Online"></div>
-        <div><label>GitLab URL</label><input name="gitlab_url" value="${esc(p?.gitlab_url || "https://gitlab.gingco.de")}"></div>
-        <div><label>Project path *</label><input name="path" value="${esc(p?.path)}" placeholder="group/project" required></div>
-        <div><label>Branch *</label><input name="ref" value="${esc(p?.ref)}" placeholder="staging" list="branchlist" required></div>
-        <datalist id="branchlist"></datalist>
+        <div><label>GitLab URL</label><input name="gitlab_url" value="${esc(v.gitlab_url || DEFAULTS.gitlab_url)}"></div>
+        <div><label>Project path *</label><input name="path" value="${esc(p?.path)}" placeholder="type to search GitLab…" list="projlist" autocomplete="off" required>
+          <div class="hint" id="pinfo"></div></div>
+        <datalist id="projlist"></datalist>
+        <div><label>Branch *</label><select name="ref" required>${branchOpts([], v.ref)}</select></div>
       </div></div>
       <div class="card"><div class="sec-title">Run pipeline</div><div class="fields">
-        <div><label>Variables</label><input name="variables" value="${esc(varsStr(p?.variables))}" placeholder="KEY=VALUE, KEY2=VALUE2"></div>
-        <div><label>Auto-play manual jobs</label><input name="auto_play" value="${esc((p?.auto_play || []).join(", "))}" placeholder="build:main">
+        <div><label>Variables</label><input name="variables" value="${esc(varsStr(v.variables))}" placeholder="KEY=VALUE, KEY2=VALUE2"></div>
+        <div><label>Auto-play manual jobs</label><input name="auto_play" value="${esc((v.auto_play || []).join(", "))}" placeholder="build:main">
           <div class="hint">These manual jobs are started automatically when ready.</div></div>
       </div></div>
       <div class="card"><div class="sec-title">TYPO3 auto-update</div>
         <label class="check"><input type="checkbox" name="auto_enabled" ${a.enabled ? "checked" : ""}> Start update pipeline when a new TYPO3 release appears</label>
         <div class="fields" style="margin-top:12px">
-          <div><label>TYPO3 major</label><input name="major" value="${esc(a.major)}"></div>
+          <div><label>TYPO3 major</label><select name="major">${[...new Set([12, 13, 14, Number(a.major)])].filter(Boolean).sort((x, y) => x - y)
+            .map(m => `<option value="${m}" ${m === Number(a.major) ? "selected" : ""}>${m}</option>`).join("")}</select></div>
           <div><label>Update variables</label><input name="auto_variables" value="${esc(varsStr(a.variables))}"></div>
           <div><label>Auto-play jobs (update)</label><input name="auto_typo3_play" value="${esc((a.auto_play || []).join(", "))}"></div>
         </div></div>
       <div class="card"><div class="sec-title">Production (promote)</div><div class="fields">
-        <div><label>Production branch</label><input name="prod_ref" value="${esc(p?.production?.ref)}" placeholder="production" list="branchlist">
+        <div><label>Production branch</label><select name="prod_ref">${branchOpts([], v.production?.ref || "", true)}</select>
           <div class="hint">Empty = no promote. Button appears after a successful pipeline on the branch above.</div></div>
-        <div><label>Variables</label><input name="prod_variables" value="${esc(varsStr(p?.production?.variables))}" placeholder="KEY=VALUE"></div>
-        <div><label>Auto-play manual jobs</label><input name="prod_play" value="${esc((p?.production ? p.production.auto_play || [] : p?.auto_play || []).join(", "))}">
+        <div><label>Variables</label><input name="prod_variables" value="${esc(varsStr(v.production?.variables))}" placeholder="KEY=VALUE"></div>
+        <div><label>Auto-play manual jobs</label><input name="prod_play" value="${esc((v.production ? v.production.auto_play || [] : v.auto_play || []).join(", "))}">
           <div class="hint">Pre-filled from the jobs above; edit to differ.</div></div>
       </div></div>
       <div class="actions"><button class="btn" type="submit">${p ? "Save changes" : "Create project"}</button>
         <a class="btn sec" href="${p ? pUrl(p) : "#/"}">Cancel</a></div>
     </form>`;
-  const fm = $("#pform"), sp = fm.elements.auto_play, pp = fm.elements.prod_play, pr = fm.elements.prod_ref;
-  let prodTouched = !!(p && p.production);       // saved production config is never overwritten
-  pr.addEventListener("input", () => { prodTouched = true; });
-  async function loadBranches() {                // GitLab branches -> suggestions + prefill production branch
-    const url = fm.elements.gitlab_url.value.trim(), path = fm.elements.path.value.trim();
-    if (!url || !path) return;
+  const fm = $("#pform"), E = fm.elements, sp = E.auto_play, pp = E.prod_play;
+  // Pre-fill from GitLab: only fields the user has not typed in; when editing, only empty ones.
+  const touched = new Set();
+  fm.addEventListener("input", ev => touched.add(ev.target.name));
+  const fill = (name, val) => {
+    const el = E[name];
+    if (val == null || val === "" || touched.has(name) || (p && el.value.trim())) return;
+    if (el.tagName === "SELECT" && ![...el.options].some(o => o.value === String(val))) el.add(new Option(val, val));
+    el.value = Array.isArray(val) ? val.join(", ") : val;
+  };
+  let searchT;
+  E.path.addEventListener("input", () => {        // project search suggestions
+    clearTimeout(searchT);
+    const q = E.path.value.trim();
+    if (q.length < 2) return;
+    searchT = setTimeout(async () => {
+      try {
+        const r = await api(`/api/search?gitlab_url=${encodeURIComponent(E.gitlab_url.value.trim())}&q=${encodeURIComponent(q)}`);
+        $("#projlist").innerHTML = r.map(x => `<option value="${esc(x.path)}">${esc(x.name)}</option>`).join("");
+      } catch (e) { /* suggestions are optional */ }
+    }, 300);
+  });
+  async function loadInfo() {
+    const url = E.gitlab_url.value.trim(), path = E.path.value.trim();
+    if (!url || !path.includes("/")) return;
+    $("#pinfo").textContent = "Reading project from GitLab…";
     try {
-      const d = await api(`/api/branches?gitlab_url=${encodeURIComponent(url)}&path=${encodeURIComponent(path)}`);
-      $("#branchlist").innerHTML = d.branches.map(b => `<option value="${esc(b)}">`).join("");
-      const guess = d.branches.includes("production") ? "production" : d.default;
-      if (!prodTouched && guess && guess !== fm.elements.ref.value.trim()) pr.value = guess;
-    } catch (e) { /* lookup is optional; field stays editable */ }
+      const d = await api(`/api/project-info?gitlab_url=${encodeURIComponent(url)}&path=${encodeURIComponent(path)}&ref=${encodeURIComponent(E.ref.value.trim())}`);
+      E.ref.innerHTML = branchOpts(d.branches, E.ref.value);
+      E.prod_ref.innerHTML = branchOpts(d.branches, E.prod_ref.value, true);
+      fill("name", d.name); fill("ref", d.ref); fill("auto_play", d.auto_play);
+      fill("prod_ref", d.prod_ref); fill("prod_play", d.prod_play); fill("major", d.major);
+      synced = pp.value === sp.value;
+      $("#pinfo").textContent = `Pre-filled from GitLab (default branch: ${d.default}${d.major ? `, TYPO3 ${d.major}` : ""})`;
+    } catch (e) { $("#pinfo").textContent = `GitLab lookup failed: ${e.message}`; }
   }
-  fm.elements.path.addEventListener("change", loadBranches);
-  fm.elements.gitlab_url.addEventListener("change", loadBranches);
-  loadBranches();
+  E.path.addEventListener("change", loadInfo);
+  E.ref.addEventListener("change", loadInfo);
+  E.gitlab_url.addEventListener("change", loadInfo);
   let synced = pp.value === sp.value;            // mirror staging jobs until prod field is edited by hand
   sp.addEventListener("input", () => { if (synced) pp.value = sp.value; });
   pp.addEventListener("input", () => { synced = pp.value === sp.value; });
+  loadInfo();
   $("#pform").onsubmit = async ev => {
     ev.preventDefault();
     const f = new FormData(ev.target);
