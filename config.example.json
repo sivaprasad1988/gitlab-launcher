@@ -29,6 +29,10 @@
       "t3monitor": {
         "url": "https://www.example.com/",
         "auth_user": ""
+      },
+      "t3monitor_staging": {
+        "url": "https://staging.example.com/",
+        "auth_user": ""
       }
     }
   ],

@@ -11,3 +11,5 @@ certs/
 *.t3monitor-key
 t3monitor/
 *.t3monitor-auth
+*.t3monitor-staging-key
+*.t3monitor-staging-auth
