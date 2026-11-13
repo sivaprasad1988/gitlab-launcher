@@ -497,6 +497,9 @@ function t3mFields(e, p) {
         <div><label>t3monitor key (64 characters)</label><input name="${e.f}key" type="password" autocomplete="new-password"
           placeholder="${hasKey ? "stored – leave empty to keep" : "not stored"}">
           <div class="hint">Extension configuration → t3monitor → encryption_key. Stored server-side only.</div>
+          <button type="button" class="btn sec sm" data-gen="${e.f}key" style="margin-top:6px">Generate key</button>
+          <button type="button" class="btn sec sm" data-copy="${e.f}key" style="margin-top:6px">Copy</button>
+          <div class="hint" data-genhint="${e.f}key" style="display:none">Generated locally. Copy this value into the ${esc(e.label.toLowerCase())} site’s t3monitor <b>encryption_key</b>, then Save changes. Must match on both sides.</div>
           ${hasKey ? `<label class="check" style="margin-top:6px"><input type="checkbox" name="${e.f}key_clear"> Remove stored key</label>` : ""}</div>
         <div><label>Basic auth user (optional)</label><input name="${e.f}auth_user" value="${esc(c.auth_user)}" autocomplete="off" placeholder="only if the site is password-protected">
           <div class="hint">Empty = no basic auth.</div></div>
@@ -545,6 +548,31 @@ function viewForm(p) {
         <a class="btn sec" href="${p ? pUrl(p) : "#/"}">Cancel</a></div>
     </form>`;
   const fm = $("#pform"), E = fm.elements, sp = E.auto_play, pp = E.prod_play;
+  // Generate a 64-char t3monitor key locally (32 random bytes → hex). Fills + reveals the field for copying.
+  // Non-destructive: nothing is stored until "Save changes"; the SAME value must be set as the site's encryption_key.
+  fm.addEventListener("click", ev => {
+    const b = ev.target.closest("[data-gen]"); if (!b) return;
+    ev.preventDefault();
+    const inp = E[b.dataset.gen];
+    inp.value = [...crypto.getRandomValues(new Uint8Array(32))].map(x => x.toString(16).padStart(2, "0")).join("");
+    inp.type = "text"; inp.focus(); inp.select();
+    const h = fm.querySelector(`[data-genhint="${b.dataset.gen}"]`); if (h) h.style.display = "";
+    toast("Key generated — copy it into the site’s t3monitor encryption_key, then Save changes");
+  });
+  // Copy the current key field value to the clipboard (clipboard API, with a legacy fallback for insecure contexts).
+  fm.addEventListener("click", async ev => {
+    const b = ev.target.closest("[data-copy]"); if (!b) return;
+    ev.preventDefault();
+    const inp = E[b.dataset.copy], val = (inp.value || "").trim();
+    if (!val) { toast("Nothing to copy — generate or enter a key first", true); return; }
+    const was = inp.type; inp.type = "text";
+    try {
+      if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(val);
+      else { inp.focus(); inp.select(); document.execCommand("copy"); }
+      toast("Key copied to clipboard");
+    } catch (e) { inp.focus(); inp.select(); toast("Copy failed — select and copy manually (Cmd/Ctrl+C)", true); }
+    if (was === "password") inp.type = "password";
+  });
   // Pre-fill from GitLab: only fields the user has not typed in; when editing, only empty ones.
   const touched = new Set();
   fm.addEventListener("input", ev => touched.add(ev.target.name));
