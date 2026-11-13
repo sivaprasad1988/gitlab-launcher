@@ -10,3 +10,4 @@ certs/
 .teams-webhook
 *.t3monitor-key
 t3monitor/
+*.t3monitor-auth

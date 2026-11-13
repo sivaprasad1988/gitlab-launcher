@@ -1,8 +1,13 @@
 # GitLab Pipeline Launcher
 
-Small local web app to start GitLab pipelines, watch their jobs and play manual jobs — plus an optional TYPO3 release watcher that triggers pipelines automatically when a new TYPO3 version is published.
+Small local web app to start GitLab pipelines, watch their jobs and play manual jobs — plus:
 
-Pure Python standard library, no dependencies. Runs on `127.0.0.1` only.
+- a **TYPO3 release watcher** that starts the staging pipelines automatically when a new TYPO3 version is published,
+- **notifications** in Microsoft Teams (or by email) before and after these automatic runs,
+- **TYPO3 status per project** (version, extensions, status checks and their history) read via the t3monitor extension,
+- a **Scheduler** page to set when the automatic checks run.
+
+Pure Python standard library, no Python packages. Uses the `openssl` command for t3monitor (built into macOS and the Docker image). Runs on `127.0.0.1` only.
 
 ## Features
 
@@ -13,7 +18,7 @@ Pure Python standard library, no dependencies. Runs on `127.0.0.1` only.
 - **Promote to production** — after a successful pipeline on the staging branch, start a pipeline on the production branch (see below)
 - **Job view** — pipeline status and jobs; play manual jobs with one click
 - **Auto-play** — listed manual jobs (e.g. `build:main`) are started automatically once they become playable (polled every 15 s, max. 2 h)
-- **TYPO3 watcher** — checks `get.typo3.org` for the latest release of a major version on the schedule set in *Scheduler*; on a new version it triggers the pipeline of every project with `auto_typo3.enabled` and shows a macOS notification
+- **TYPO3 watcher** — checks `get.typo3.org` for the latest release of a major version on the schedule set in *Scheduler*; on a new version it announces the update in Teams, then triggers the pipeline of every project with `auto_typo3.enabled` (plus a macOS notification when not running in Docker)
   - First check only stores a baseline, it does not trigger
   - Failed triggers are retried on the next check
 - **Notifications (Microsoft Teams, email)** — when a pipeline started by the TYPO3 watcher has finished (success, failed, canceled, skipped), a Teams message and/or email with status and link is sent; also when the auto-trigger could not start the pipeline. Set up in *Settings*
@@ -24,6 +29,7 @@ Pure Python standard library, no dependencies. Runs on `127.0.0.1` only.
 ## Requirements
 
 - Python 3 (stdlib only)
+- `openssl` command (for t3monitor; present on macOS and in the Docker image)
 - GitLab personal access token with `api` scope
 - Docker (recommended) — or run directly with Python
 - macOS for notifications (only when not running in Docker)
@@ -69,8 +75,9 @@ python3 app.py --no-watch    # TYPO3 release check paused (Scheduler)
 | `projects[].production.ref` | Production branch; empty = no promote button |
 | `projects[].production.variables` | CI variables for the production run |
 | `projects[].production.auto_play` | Manual jobs to auto-play after the production run |
-| `teams.enabled` | Send Teams messages for TYPO3 auto-trigger runs; webhook URL is stored in `.teams-webhook` |
 | `projects[].t3monitor.url` | Site URL with the t3monitor extension; key is stored in `<project-id>.t3monitor-key` |
+| `projects[].t3monitor.auth_user` | HTTP Basic auth user for password-protected sites (empty = none); password in `<project-id>.t3monitor-auth` |
+| `teams.enabled` | Send Teams messages for TYPO3 auto-trigger runs; webhook URL is stored in `.teams-webhook` |
 | `t3monitor_interval_hours` | Old setting: default interval of the t3monitor check until a schedule is saved |
 | `t3monitor_local_vendors` | Composer vendors of own extensions, hidden and not tracked in history (default `["gingco"]`; `dev-*` versions also count as local) |
 | `email.enabled` | Send email notifications for TYPO3 auto-trigger runs |
@@ -79,6 +86,20 @@ python3 app.py --no-watch    # TYPO3 release check paused (Scheduler)
 | `email.from` / `email.to` | Sender and list of recipients |
 
 Changing a project's TYPO3 major resets its baseline (no immediate trigger).
+
+## Scheduler
+
+Page *Scheduler* (top menu) lists the automatic tasks:
+
+| Task | Does |
+|---|---|
+| TYPO3 release check | Checks `get.typo3.org`; on a new release: Teams announcement, then the update pipelines on staging |
+| t3monitor check (TYPO3 & extensions) | Reads TYPO3 version, extensions and status checks of every project with t3monitor URL and key |
+
+- Per task: on/off, *Every N hours* (0.25–168) or *Daily at a fixed time* on chosen weekdays; shows last run, result and next run; **▶ Run now**.
+- Tasks run only while the launcher runs (checked every 30 s). A run missed while it was off starts right after the next start.
+- Default until a schedule is saved: every 6 h (or the old `check_interval_hours` / `t3monitor_interval_hours`).
+- `python3 app.py --no-watch` pauses the TYPO3 release check (shown as *paused*).
 
 ## TYPO3 status (t3monitor)
 
@@ -90,13 +111,17 @@ Changing a project's TYPO3 major resets its baseline (no immediate trigger).
 - Only technical data is stored (version, extensions, status checks) — no backend users or paths.
 - History in `t3monitor/<project-id>.json`: a new entry only when something changes (TYPO3 version, extension added/removed/updated, status severity); otherwise "seen until" is updated. Last 300 changes are kept.
 - Key file: mode `600`, never sent to the browser, removed with the project.
+- Password-protected site (HTTP Basic auth): set *Basic auth user* and *password* in the project's t3monitor settings. The user is stored in `config.json`, the password in `<project-id>.t3monitor-auth` (mode `600`, never sent to the browser). Empty user = no basic auth.
 
 ## Notifications (Microsoft Teams, email)
 
 Microsoft Teams (no mail server needed):
 
-1. In Teams, open the channel → **⋯ → Workflows** → template **"Post to a channel when a webhook request is received"** → copy the webhook URL.
+1. In Teams, open the channel → **⋯ → Workflows** → template **"Send webhook alerts to a channel"** (older name: "Post to a channel when a webhook request is received") → select team and channel → copy the webhook URL shown at the end.
 2. *Settings → Microsoft Teams notifications*: paste the URL, tick *Send Teams messages*, **Save & send test message**.
+3. To get a Teams alert for each message: channel → **⋯ → Channel notifications → Custom → All new posts: Banner and feed**.
+
+Anyone who has the webhook URL can post into the channel — treat it like a password (never paste it into chats or tickets).
 
 Email (optional, needs SMTP access): *Settings → Email notifications*: SMTP host, port, security, optional user/password, sender, recipients, tick *Send email notifications*, **Save & send test email**.
 
@@ -132,7 +157,7 @@ The container restarts automatically (`restart: unless-stopped`), also after a r
 docker compose up -d --build
 ```
 
-Open <http://127.0.0.1:8787>. `config.json`, `state.json` and `.gitlab-token` are read from and written to this folder (mounted as `/data`), so they survive rebuilds.
+Open <http://127.0.0.1:8787>. All data — `config.json`, `state.json`, `t3monitor/` and the secret files (`.gitlab-token`, `.teams-webhook`, `.smtp-password`, `*.t3monitor-key`, `*.t3monitor-auth`) — is read from and written to this folder (mounted as `/data`), so it survives rebuilds.
 
 | Task | Command |
 |---|---|
@@ -163,7 +188,7 @@ docker compose up -d --build
 Notes:
 - Ports are published on `127.0.0.1` only. Host port must match `port` in `config.json` (default `8787`), otherwise the Host header check rejects requests.
 - Stop any copy of `app.py` running in a terminal first (same port).
-- macOS notifications (TYPO3 auto-trigger) do not work inside the container; see the Activity log instead.
+- macOS notifications (TYPO3 auto-trigger) do not work inside the container; use Teams notifications or the Activity log instead.
 - Environment: `LAUNCHER_DATA` (data folder, default: app folder), `LAUNCHER_HOST` (bind address, default `127.0.0.1`), `LAUNCHER_ALLOWED_HOSTS` (extra accepted hostnames, comma-separated), `LAUNCHER_TLS_CERT` / `LAUNCHER_TLS_KEY` / `LAUNCHER_TLS_PORT` (HTTPS listener, default port `8443`).
 
 ## Security
@@ -172,21 +197,24 @@ Notes:
 - Optional HTTPS with a local mkcert certificate
 - `Host` header check against DNS rebinding
 - `Origin` check and `application/json` requirement on POST against cross-site requests
-- Token, config, state and logs are gitignored
+- Secrets (GitLab token, Teams webhook URL, SMTP password, t3monitor keys and Basic auth passwords) are stored in separate files with mode `600`, read server-side only and never sent to the browser
+- Token, secrets, config, state, t3monitor history and logs are gitignored
+- Outgoing connections: GitLab (only to the GitLab URLs of configured projects), `get.typo3.org`, the Teams webhook / SMTP server if enabled, and the t3monitor site URLs
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `app.py` | Server, GitLab API client, TYPO3 watcher |
+| `app.py` | Server, GitLab API client, TYPO3 watcher, scheduler, notifications, t3monitor client |
 | `index.html` | Web UI |
 | `config.example.json` | Example configuration |
 | `Dockerfile`, `compose.yaml` | Docker setup |
 | `certs/` | mkcert certificate + key (gitignored) |
 | `config.json` | Your configuration (gitignored) |
-| `state.json` | Runs, log, TYPO3 baselines (gitignored) |
+| `state.json` | Runs, log, TYPO3 baselines, scheduler results, pending notifications (gitignored) |
 | `.gitlab-token` | GitLab token (gitignored) |
 | `.smtp-password` | SMTP password (gitignored) |
 | `.teams-webhook` | Teams webhook URL (gitignored) |
 | `*.t3monitor-key` | t3monitor key per project (gitignored) |
+| `*.t3monitor-auth` | Basic auth password per project for t3monitor (gitignored) |
 | `t3monitor/` | t3monitor history per project (gitignored) |

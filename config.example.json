@@ -1,9 +1,8 @@
 {
   "port": 8787,
-  "check_interval_hours": 6,
   "projects": [
     {
-      "id": "example-project-staging",
+      "id": "group-project-staging",
       "name": "Example Project",
       "gitlab_url": "https://gitlab.example.com",
       "path": "group/project",
@@ -17,8 +16,40 @@
         "major": 13,
         "variables": {
           "TARGET_TASK_NAME": "task01"
-        }
+        },
+        "auto_play": []
+      },
+      "production": {
+        "ref": "production",
+        "variables": {},
+        "auto_play": [
+          "build:main"
+        ]
+      },
+      "t3monitor": {
+        "url": "https://www.example.com/",
+        "auth_user": ""
       }
     }
-  ]
+  ],
+  "scheduler": {
+    "typo3_release": {
+      "enabled": true,
+      "mode": "interval",
+      "hours": 6,
+      "time": "07:00",
+      "days": [0, 1, 2, 3, 4, 5, 6]
+    },
+    "t3monitor": {
+      "enabled": true,
+      "mode": "daily",
+      "hours": 6,
+      "time": "06:00",
+      "days": [0, 1, 2, 3, 4]
+    }
+  },
+  "t3monitor_local_vendors": ["gingco"],
+  "teams": {
+    "enabled": false
+  }
 }

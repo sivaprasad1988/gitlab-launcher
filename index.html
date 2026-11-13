@@ -357,6 +357,11 @@ function viewForm(p) {
           placeholder="${p && S.t3monitor_keys.includes(p.id) ? "stored – leave empty to keep" : "not stored"}">
           <div class="hint">Extension configuration → t3monitor → encryption_key. Stored server-side only.</div>
           ${p && S.t3monitor_keys.includes(p.id) ? `<label class="check" style="margin-top:6px"><input type="checkbox" name="t3m_key_clear"> Remove stored key</label>` : ""}</div>
+        <div><label>Basic auth user (optional)</label><input name="t3m_auth_user" value="${esc(v.t3monitor?.auth_user)}" autocomplete="off" placeholder="only if the site is password-protected">
+          <div class="hint">Empty = no basic auth.</div></div>
+        <div><label>Basic auth password</label><input name="t3m_auth_password" type="password" autocomplete="new-password"
+          placeholder="${p && S.t3monitor_auth.includes(p.id) ? "stored – leave empty to keep" : "not stored"}">
+          ${p && S.t3monitor_auth.includes(p.id) ? `<label class="check" style="margin-top:6px"><input type="checkbox" name="t3m_auth_clear"> Remove stored password</label>` : ""}</div>
       </div></div>
       <div class="actions"><button class="btn" type="submit">${p ? "Save changes" : "Create project"}</button>
         <a class="btn sec" href="${p ? pUrl(p) : "#/"}">Cancel</a></div>
@@ -412,7 +417,8 @@ function viewForm(p) {
       auto_enabled:f.get("auto_enabled") === "on", major:f.get("major"),
       auto_variables:parseVars(f.get("auto_variables")), auto_typo3_play:f.get("auto_typo3_play"),
       prod_ref:f.get("prod_ref"), prod_variables:parseVars(f.get("prod_variables")), prod_play:f.get("prod_play"),
-      t3m_url:f.get("t3m_url"), t3m_key:f.get("t3m_key"), t3m_key_clear:f.get("t3m_key_clear") === "on"};
+      t3m_url:f.get("t3m_url"), t3m_key:f.get("t3m_key"), t3m_key_clear:f.get("t3m_key_clear") === "on",
+      t3m_auth_user:f.get("t3m_auth_user"), t3m_auth_password:f.get("t3m_auth_password"), t3m_auth_clear:f.get("t3m_auth_clear") === "on"};
     try {
       const saved = p ? await api("/api/projects/update", {...body, id:p.id}) : await api("/api/projects", body);
       await refresh(); toast(p ? "Project saved" : "Project created"); location.hash = pUrl(saved);

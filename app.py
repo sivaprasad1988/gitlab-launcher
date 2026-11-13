@@ -299,6 +299,15 @@ def t3m_key_file(pid):
     return DATA / f"{pid}.t3monitor-key"
 
 
+def t3m_auth_file(pid):
+    return t3m_key_file(pid).with_suffix(".t3monitor-auth")
+
+
+def t3m_auth_password(pid):
+    f = t3m_auth_file(pid)
+    return f.read_text(encoding="utf-8") if f.exists() else ""
+
+
 def t3m_key(pid):
     f = t3m_key_file(pid)
     return f.read_text(encoding="utf-8").strip() if f.exists() else ""
@@ -412,11 +421,19 @@ def t3m_fetch(project):
         if not url or not key:
             raise RuntimeError("t3monitor URL or key missing")
         q = urllib.parse.urlencode({"t3monitor": 1, "secret": key[:32], "reports": T3M_REPORTS})
-        req = urllib.request.Request(url.rstrip("/") + "/?" + q, headers={"User-Agent": "gitlab-launcher"})
+        headers = {"User-Agent": "gitlab-launcher"}
+        auth_user = (project.get("t3monitor") or {}).get("auth_user") or ""
+        if auth_user:
+            cred = f"{auth_user}:{t3m_auth_password(pid)}".encode()
+            headers["Authorization"] = "Basic " + base64.b64encode(cred).decode()
+        req = urllib.request.Request(url.rstrip("/") + "/?" + q, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
                 raw = r.read().decode("utf-8", errors="replace").strip()
         except urllib.error.HTTPError as e:
+            if e.code == 401:
+                raise RuntimeError("HTTP 401: Basic auth required or wrong (set user/password in the project's "
+                                   "t3monitor settings)") from None
             raise RuntimeError(f"HTTP {e.code}: {_plain(e.read().decode(errors='replace'), 200)}") from None
         except urllib.error.URLError as e:
             raise RuntimeError(f"Site not reachable: {e.reason}") from None
@@ -844,6 +861,7 @@ class Handler(BaseHTTPRequestHandler):
                     "teams": teams_cfg(),
                     "teams_url_set": bool(teams_url()),
                     "t3monitor_keys": [p["id"] for p in cfg["projects"] if t3m_key(p["id"])],
+                    "t3monitor_auth": [p["id"] for p in cfg["projects"] if t3m_auth_password(p["id"])],
                     "last_check": st.get("last_check"),
                     "typo3_latest": st.get("typo3_latest", {}),
                     "typo3_seen": st.get("typo3_seen", {}),
@@ -936,6 +954,7 @@ class Handler(BaseHTTPRequestHandler):
                     cfg["projects"] = [p for p in cfg["projects"] if p["id"] != body["id"]]
                     save(CONFIG, cfg)
                 t3m_key_file(body["id"]).unlink(missing_ok=True)
+                t3m_auth_file(body["id"]).unlink(missing_ok=True)
                 log(f"Project removed: {body['id']}")
                 return self._send(200, {"ok": True})
             return self._send(404, {"error": "not found"})
@@ -1039,7 +1058,14 @@ def build_project(b, pid=None):
             "ref": (b.get("prod_ref") or "").strip(),
             "variables": b.get("prod_variables") or {},
             "auto_play": _jobs(b.get("prod_play"))},
-        "t3monitor": {"url": _t3m_url(b.get("t3m_url"))}}
+        "t3monitor": {"url": _t3m_url(b.get("t3m_url")), "auth_user": _t3m_user(b.get("t3m_auth_user"))}}
+
+
+def _t3m_user(v):
+    v = (v or "").strip()
+    if ":" in v or any(c.isspace() for c in v):
+        raise RuntimeError("Basic auth user must not contain ':' or spaces")
+    return v
 
 
 def _t3m_url(v):
@@ -1054,6 +1080,10 @@ def save_t3m_key(pid, b):
         t3m_key_file(pid).unlink(missing_ok=True)
     elif (b.get("t3m_key") or "").strip():
         t3m_save_key(pid, b["t3m_key"])
+    if b.get("t3m_auth_clear") or not (b.get("t3m_auth_user") or "").strip():
+        t3m_auth_file(pid).unlink(missing_ok=True)     # no user = no basic auth
+    elif b.get("t3m_auth_password"):                   # empty field = keep stored password
+        write_secret(t3m_auth_file(pid), b["t3m_auth_password"])
 
 
 def update_project(b):
