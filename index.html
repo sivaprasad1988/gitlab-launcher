@@ -363,6 +363,19 @@ function viewSettings() {
             <button class="btn sec" type="button" data-act="tokentest">Test</button>
             <button class="btn danger" type="button" data-act="tokendel">Remove</button></div>
         </form></div>
+      <div class="card"><h2>Microsoft Teams notifications</h2>
+        <p class="sub" style="margin:0 0 12px">Posts a message to a Teams channel when a pipeline started automatically by the TYPO3 watcher has finished (or could not be started).
+          Create the webhook in Teams: channel → ⋯ → Workflows → "Post to a channel when a webhook request is received".</p>
+        <form id="msform" class="stack">
+          <label class="check"><input type="checkbox" name="enabled" ${S.teams.enabled ? "checked" : ""}> Send Teams messages</label>
+          <div class="fields">
+            <div><label>Webhook URL</label><input name="url" type="password" autocomplete="off"
+              placeholder="${S.teams_url_set ? "stored – leave empty to keep" : "https://…"}"></div>
+          </div>
+          <div class="actions"><button class="btn" type="submit">Save</button>
+            <button class="btn sec" type="button" data-act="teamstest">Save &amp; send test message</button>
+            ${S.teams_url_set ? `<button class="btn danger" type="button" data-act="teamsdel">Remove URL</button>` : ""}</div>
+        </form></div>
       <div class="card"><h2>Email notifications</h2>
         <p class="sub" style="margin:0 0 12px">Sends an email when a pipeline started automatically by the TYPO3 watcher has finished (or could not be started).</p>
         <form id="eform" class="stack">
@@ -393,10 +406,19 @@ function viewSettings() {
     try { const d = await api("/api/token", {token:ev.target.token.value}); ev.target.reset(); await refresh(); viewSettings(); toast(d.msg); }
     catch (e) { toast(e.message, true); }
   };
+  $("#msform").onsubmit = async ev => {
+    ev.preventDefault();
+    try { await saveTeams(); toast("Teams settings saved"); } catch (e) { toast(e.message, true); }
+  };
   $("#eform").onsubmit = async ev => {
     ev.preventDefault();
     try { await saveEmail(); toast("Email settings saved"); } catch (e) { toast(e.message, true); }
   };
+}
+async function saveTeams(extra) {
+  const f = $("#msform");
+  await api("/api/teams", {enabled:f.enabled.checked, url:f.url.value, ...extra});
+  await refresh(); viewSettings();
 }
 async function saveEmail(extra) {
   const f = $("#eform");
@@ -450,6 +472,15 @@ const actions = {
     el.disabled = true;
     try { await api("/api/check-now", {}); await refresh(); viewSettings(); toast("TYPO3 check done"); }
     catch (e) { toast(e.message, true); el.disabled = false; }
+  },
+  async teamstest(el) {
+    el.disabled = true;
+    try { await saveTeams(); toast((await api("/api/teams/test", {})).msg); }
+    catch (e) { toast(e.message, true); el.disabled = false; }
+  },
+  async teamsdel() {
+    if (!confirm("Remove the stored Teams webhook URL? Teams messages are switched off.")) return;
+    try { await saveTeams({enabled:false, url:"", clear_url:true}); toast("Webhook URL removed"); } catch (e) { toast(e.message, true); }
   },
   async mailtest(el) {
     el.disabled = true;

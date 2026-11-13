@@ -30,6 +30,7 @@ STATE = DATA / "state.json"
 TOKEN_FILE = DATA / ".gitlab-token"              # stored by the app (chmod 600)
 TOKEN_FALLBACK = Path.home() / ".gitlab-token"     # optional fallback
 SMTP_PASSWORD_FILE = DATA / ".smtp-password"        # stored by the app (chmod 600)
+TEAMS_FILE = DATA / ".teams-webhook"                # Teams webhook URL, a secret (chmod 600)
 HOST = os.environ.get("LAUNCHER_HOST", "127.0.0.1")  # Docker: 0.0.0.0, published on 127.0.0.1 only
 # extra Host header values, e.g. "local-gitlabrunner.local" (Docker publishes it on port 80)
 ALLOWED_HOSTS = {h.strip() for h in os.environ.get("LAUNCHER_ALLOWED_HOSTS", "").split(",") if h.strip()}
@@ -122,10 +123,7 @@ def save_email(b):
     if b.get("clear_password"):
         SMTP_PASSWORD_FILE.unlink(missing_ok=True)
     elif pw:                                   # empty field = keep stored password
-        fd = os.open(SMTP_PASSWORD_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(pw)
-        os.chmod(SMTP_PASSWORD_FILE, 0o600)
+        write_secret(SMTP_PASSWORD_FILE, pw)
     log("Email settings saved")
     return e
 
@@ -150,15 +148,81 @@ def send_mail(subject, text, cfg=None):
         s.send_message(msg)
 
 
-def mail_event(subject, text):
-    """Send a notification mail if enabled; errors only go to the log."""
-    if not email_cfg()["enabled"]:
-        return
+def write_secret(path, value):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(value)
+    os.chmod(path, 0o600)
+
+
+# ---------------------------------------------------------------- Microsoft Teams
+def teams_url():
+    return TEAMS_FILE.read_text(encoding="utf-8").strip() if TEAMS_FILE.exists() else ""
+
+
+def teams_cfg():
+    return {"enabled": bool((config().get("teams") or {}).get("enabled"))}
+
+
+def save_teams(b):
+    url = (b.get("url") or "").strip()
+    if b.get("clear_url"):
+        TEAMS_FILE.unlink(missing_ok=True)
+    elif url:                                  # empty field = keep stored URL
+        if not url.startswith("https://") or any(c.isspace() for c in url):
+            raise RuntimeError("Webhook URL must start with https:// and contain no spaces")
+        write_secret(TEAMS_FILE, url)
+    enabled = bool(b.get("enabled"))
+    if enabled and not teams_url():
+        raise RuntimeError("Webhook URL is required")
+    with lock:
+        cfg = config()
+        cfg["teams"] = {"enabled": enabled}
+        save(CONFIG, cfg)
+    log("Teams settings saved")
+    return teams_cfg()
+
+
+def send_teams(title, intro, facts, link=None):
+    """Post an Adaptive Card (format accepted by Teams Workflows and legacy incoming webhooks)."""
+    url = teams_url()
+    if not url:
+        raise RuntimeError("No Teams webhook URL stored")
+    card = {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "version": "1.4", "body": [
+                {"type": "TextBlock", "text": title, "weight": "Bolder", "size": "Medium", "wrap": True},
+                {"type": "TextBlock", "text": intro, "wrap": True},
+                {"type": "FactSet", "facts": [{"title": k, "value": str(v)} for k, v in facts]}]}
+    if link:
+        card["actions"] = [{"type": "Action.OpenUrl", "title": "Open pipeline", "url": link}]
+    body = json.dumps({"type": "message", "attachments": [
+        {"contentType": "application/vnd.microsoft.card.adaptive", "contentUrl": None, "content": card}]}).encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
     try:
-        send_mail(subject, text)
-        log(f"Email sent: {subject}")
-    except Exception as e:
-        log(f"Email failed ({subject}): {e}")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Teams HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from None
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Teams not reachable: {e.reason}") from None
+
+
+def notify_event(title, intro, facts, link=None):
+    """Send to every enabled channel (Teams, email); errors only go to the log."""
+    if teams_cfg()["enabled"]:
+        try:
+            send_teams(title, intro, facts, link)
+            log(f"Teams message sent: {title}")
+        except Exception as e:
+            log(f"Teams message failed ({title}): {e}")
+    if email_cfg()["enabled"]:
+        text = intro + "\n\n" + "\n".join(f"{k + ':':<10}{v}" for k, v in facts) + \
+            (f"\n{'Link:':<10}{link}" if link else "") + "\n"
+        try:
+            send_mail("[GitLab Launcher] " + title, text)
+            log(f"Email sent: {title}")
+        except Exception as e:
+            log(f"Email failed ({title}): {e}")
 
 
 def _mail_watch_done(pipeline_id):
@@ -192,17 +256,16 @@ def watch_pipeline_mail(w):
         return                                     # resumed on next start (kept in state.json)
     status = pl["status"] if pl else "unknown"
     final = status in FINAL_STATUSES
-    lines = [f"Project:  {project['name']} ({project['path']})",
-             f"Branch:   {project['ref']}",
-             f"Trigger:  {w['trigger']}",
-             f"Pipeline: #{w['pipeline']}",
-             f"Status:   {status}" + ("" if final else " (not finished within 24 h)"),
-             f"Started:  {w['t']}",
-             f"Finished: {(pl or {}).get('finished_at') or '-'}",
-             f"Link:     {(pl or {}).get('web_url') or w.get('web_url') or '-'}"]
-    subject = (f"[GitLab Launcher] TYPO3 update {project['name']}: "
-               f"{status.upper() if final else 'NOT FINISHED (' + status + ')'}")
-    mail_event(subject, "Automatic TYPO3 update pipeline on staging.\n\n" + "\n".join(lines) + "\n")
+    facts = [("Project", f"{project['name']} ({project['path']})"),
+             ("Branch", project["ref"]),
+             ("Trigger", w["trigger"]),
+             ("Pipeline", f"#{w['pipeline']}"),
+             ("Status", status + ("" if final else " (not finished within 24 h)")),
+             ("Started", w["t"]),
+             ("Finished", (pl or {}).get("finished_at") or "-")]
+    title = f"TYPO3 update {project['name']}: {status.upper() if final else 'NOT FINISHED (' + status + ')'}"
+    notify_event(title, "Automatic TYPO3 update pipeline on staging.", facts,
+                 (pl or {}).get("web_url") or w.get("web_url"))
     _mail_watch_done(w["pipeline"])
 
 
@@ -371,10 +434,11 @@ def check_typo3():
                 # Not marked as seen -> retried on next check.
                 log(f"Auto-trigger failed for {p['id']} (TYPO3 {v}): {e}")
                 notify("TYPO3 auto-update FAILED", f"{p['name']}: {e}")
-                mail_event(f"[GitLab Launcher] TYPO3 update {p['name']}: NOT STARTED",
-                           f"The automatic TYPO3 update pipeline could not be started.\n\n"
-                           f"Project: {p['name']} ({p['path']})\nBranch:  {p['ref']}\n"
-                           f"Trigger: {trigger}\nError:   {e}\n\nIt is retried on the next check.\n")
+                notify_event(f"TYPO3 update {p['name']}: NOT STARTED",
+                             "The automatic TYPO3 update pipeline could not be started. "
+                             "It is retried on the next check.",
+                             [("Project", f"{p['name']} ({p['path']})"), ("Branch", p["ref"]),
+                              ("Trigger", trigger), ("Error", e)])
 
     with lock:
         st = load(STATE, {})
@@ -446,6 +510,8 @@ class Handler(BaseHTTPRequestHandler):
                     "token_source": token_source()[0],
                     "email": email_cfg(),
                     "email_password_set": bool(smtp_password()),
+                    "teams": teams_cfg(),
+                    "teams_url_set": bool(teams_url()),
                     "last_check": st.get("last_check"),
                     "typo3_latest": st.get("typo3_latest", {}),
                     "typo3_seen": st.get("typo3_seen", {}),
@@ -496,6 +562,12 @@ class Handler(BaseHTTPRequestHandler):
                 TOKEN_FILE.unlink(missing_ok=True)
                 log("GitLab token removed from app folder")
                 return self._send(200, {"ok": True})
+            if path == "/api/teams":
+                return self._send(200, save_teams(body))
+            if path == "/api/teams/test":
+                send_teams("GitLab Launcher: test message", "Teams notifications of the GitLab Launcher work.", [])
+                log("Teams test message sent")
+                return self._send(200, {"msg": "Teams test message sent"})
             if path == "/api/email":
                 return self._send(200, save_email(body))
             if path == "/api/email/test":
