@@ -12,6 +12,7 @@ import hashlib
 import html
 import json
 import os
+import posixpath
 import re
 import smtplib
 import ssl
@@ -38,6 +39,8 @@ TEAMS_FILE = DATA / ".teams-webhook"                # Teams webhook URL, a secre
 T3M_DIR = DATA / "t3monitor"                        # t3monitor history per project
 T3M_REPORTS = "internal,security,installed_extensions"
 T3M_KEEP = 300                                      # snapshots (= changes) kept per project
+PACKAGIST = "https://repo.packagist.org/p2/"         # extension update check (public package metadata only)
+PKG_TTL = 3600                                       # seconds a package's version list is cached
 SEVERITY = {-2: "notice", -1: "info", 0: "ok", 1: "warning", 2: "error"}
 HOST = os.environ.get("LAUNCHER_HOST", "127.0.0.1")  # Docker: 0.0.0.0, published on 127.0.0.1 only
 # extra Host header values, e.g. "local-gitlabrunner.local" (Docker publishes it on port 80)
@@ -199,8 +202,9 @@ def send_teams(title, intro, facts, link=None, link_title="Open pipeline"):
     card = {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
             "version": "1.4", "body": [
                 {"type": "TextBlock", "text": title, "weight": "Bolder", "size": "Medium", "wrap": True},
-                {"type": "TextBlock", "text": intro, "wrap": True},
-                {"type": "FactSet", "facts": [{"title": k, "value": str(v)} for k, v in facts]}]}
+                {"type": "TextBlock", "text": intro, "wrap": True}]}
+    if facts:                                  # an empty FactSet can make Teams reject the whole card
+        card["body"].append({"type": "FactSet", "facts": [{"title": str(k), "value": str(v)} for k, v in facts]})
     if link:
         card["actions"] = [{"type": "Action.OpenUrl", "title": link_title, "url": link}]
     body = json.dumps({"type": "message", "attachments": [
@@ -209,6 +213,7 @@ def send_teams(title, intro, facts, link=None, link_title="Open pipeline"):
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             r.read()
+            return r.status
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"Teams HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from None
     except urllib.error.URLError as e:
@@ -293,36 +298,52 @@ def resume_mail_watches():
 
 
 # ---------------------------------------------------------------- t3monitor
-def t3m_key_file(pid):
+# Instances per project: config key, form field prefix, file name part. "production" keeps the original names.
+T3M_ENVS = {"production": {"cfg": "t3monitor", "form": "t3m_", "file": "", "label": "Production"},
+            "staging": {"cfg": "t3monitor_staging", "form": "t3ms_", "file": "-staging", "label": "Staging"}}
+
+
+def t3m_env(env):
+    if env not in T3M_ENVS:
+        raise RuntimeError(f"Unknown t3monitor instance: {env}")
+    return T3M_ENVS[env]
+
+
+def t3m_cfg(project, env="production"):
+    return project.get(t3m_env(env)["cfg"]) or {}
+
+
+def t3m_key_file(pid, env="production"):
     if not re.fullmatch(r"[\w.\-]+", pid):
         raise RuntimeError(f"Invalid project id: {pid}")
-    return DATA / f"{pid}.t3monitor-key"
+    return DATA / f"{pid}.t3monitor{t3m_env(env)['file']}-key"
 
 
-def t3m_auth_file(pid):
-    return t3m_key_file(pid).with_suffix(".t3monitor-auth")
+def t3m_auth_file(pid, env="production"):
+    t3m_key_file(pid, env)                               # validates pid + env
+    return DATA / f"{pid}.t3monitor{T3M_ENVS[env]['file']}-auth"
 
 
-def t3m_auth_password(pid):
-    f = t3m_auth_file(pid)
+def t3m_auth_password(pid, env="production"):
+    f = t3m_auth_file(pid, env)
     return f.read_text(encoding="utf-8") if f.exists() else ""
 
 
-def t3m_key(pid):
-    f = t3m_key_file(pid)
+def t3m_key(pid, env="production"):
+    f = t3m_key_file(pid, env)
     return f.read_text(encoding="utf-8").strip() if f.exists() else ""
 
 
-def t3m_save_key(pid, key):
+def t3m_save_key(pid, key, env="production"):
     key = (key or "").strip()
     if len(key) != 64 or any(c.isspace() for c in key):
-        raise RuntimeError("t3monitor key must be exactly 64 characters")
-    write_secret(t3m_key_file(pid), key)
+        raise RuntimeError(f"t3monitor key ({T3M_ENVS[env]['label']}) must be exactly 64 characters")
+    write_secret(t3m_key_file(pid, env), key)
 
 
-def t3m_history_file(pid):
-    t3m_key_file(pid)                                    # validates pid
-    return T3M_DIR / f"{pid}.json"
+def t3m_history_file(pid, env="production"):
+    t3m_key_file(pid, env)                               # validates pid + env
+    return (T3M_DIR / f"{pid}.json") if env == "production" else (T3M_DIR / env / f"{pid}.json")
 
 
 def t3m_decrypt(key, raw):
@@ -376,6 +397,267 @@ def t3m_parse(xml):
             "extensions": dict(sorted(exts.items())), "status": status}
 
 
+# ---------------------------------------------------------------- extension updates (Packagist)
+_pkg_cache = {}                                      # name -> (fetched_at, [version dicts] or None)
+
+
+def _pkg_versions(name):
+    """All versions of a Composer package from Packagist (expanded), None if unknown there."""
+    hit = _pkg_cache.get(name)
+    if hit and time.time() - hit[0] < PKG_TTL:
+        return hit[1]
+    req = urllib.request.Request(PACKAGIST + urllib.parse.quote(name) + ".json", headers={"User-Agent": "gitlab-launcher"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = json.loads(r.read()).get("packages", {}).get(name, [])
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise RuntimeError(f"Packagist HTTP {e.code}") from None
+        raw = None
+    versions, cur = None, None
+    if raw is not None:                              # p2 metadata is minified: each entry only lists changes
+        versions = []
+        for v in raw:
+            cur = dict(v) if cur is None else {**cur, **v}
+            cur = {k: x for k, x in cur.items() if x != "__unset"}
+            versions.append(cur)
+    _pkg_cache[name] = (time.time(), versions)
+    return versions
+
+
+def _vparse(s):
+    """'v13.4.2' -> ((13, 4, 2, 0), 3); None if not numeric."""
+    m = re.match(r"v?(\d+(?:\.\d+){0,3})", (s or "").strip())
+    if not m:
+        return None
+    p = [int(x) for x in m.group(1).split(".")]
+    return tuple(p + [0] * (4 - len(p))), len(p)
+
+
+def _bump(t, i):
+    return tuple(list(t[:i]) + [t[i] + 1] + [0] * (3 - i))
+
+
+def _part_ok(v, part):
+    """One Composer constraint part, e.g. '^13.4', '>=12.4', '13.*', '~1.2'."""
+    if part in ("*", "x"):
+        return True
+    m = re.fullmatch(r"(\^|~|>=|<=|!=|==|>|<|=)?(.+)", part)
+    op, ver = m.group(1) or "", m.group(2)
+    wild = re.fullmatch(r"v?(\d+(?:\.\d+)*)\.[*x]", ver)
+    if wild:
+        lo, n = _vparse(wild.group(1))
+        return lo <= v < _bump(lo, n - 1)
+    pv = _vparse(ver)
+    if not pv or not re.fullmatch(r"v?[\d.]+", ver):
+        return False                                 # dev-main etc.
+    t, n = pv
+    if op == "^":
+        i = next((k for k in range(n) if t[k]), n - 1)
+        return t <= v < _bump(t, i)
+    if op == "~":
+        return t <= v < _bump(t, max(n - 2, 0))
+    return {">=": v >= t, "<=": v <= t, ">": v > t, "<": v < t, "!=": v != t}.get(op, v == t)
+
+
+def constraint_ok(version, constraint):
+    """True if version (e.g. '13.4.39') satisfies a Composer constraint (e.g. '^12 || ^13 || ^14.3')."""
+    pv = _vparse(version)
+    if not pv:
+        return False
+    v = pv[0]
+    c = re.sub(r"@\w+", "", constraint or "")
+    c = re.sub(r"(>=|<=|!=|==|>|<|=|\^|~)\s+", r"\1", c)
+    for alt in re.split(r"\s*\|\|?\s*", c.strip()):
+        hy = re.fullmatch(r"(\S+)\s+-\s+(\S+)", alt)
+        if hy:
+            lo, hi = _vparse(hy.group(1)), _vparse(hy.group(2))
+            if lo and hi and v >= lo[0] and (v < _bump(hi[0], hi[1] - 1) if hi[1] < 3 else v <= hi[0]):
+                return True
+            continue
+        parts = [x for x in re.split(r"\s*,\s*|\s+", alt) if x]
+        if parts and all(_part_ok(v, x) for x in parts):
+            return True
+    return False
+
+
+def _typo3_req(pkg):
+    req = pkg.get("require") or {}
+    if "typo3/cms-core" in req:
+        return req["typo3/cms-core"]
+    return next((c for k, c in req.items() if k.startswith("typo3/cms-")), None)   # None = no TYPO3 constraint
+
+
+def ext_latest(composer, typo3):
+    """Newest stable version compatible with the site's TYPO3 version; None if the package is unknown."""
+    versions = _pkg_versions(composer.lower())
+    if versions is None:
+        return None
+    best = None
+    for p in versions:
+        ver = p.get("version", "")
+        if not re.fullmatch(r"v?\d+(\.\d+){0,3}", ver):
+            continue                                 # dev, alpha, beta, RC
+        req = _typo3_req(p)
+        if typo3 and req is not None and not constraint_ok(typo3, req):
+            continue
+        pv = _vparse(ver)[0]
+        if best is None or pv > best[0]:
+            best = (pv, ver)
+    return best[1] if best else ""
+
+
+def t3m_add_updates(data):
+    """Adds latest/update/major to every public extension (errors never fail the t3monitor check)."""
+    down = None                                      # Packagist unreachable -> skip the rest of this run
+    for e in data["extensions"].values():
+        if e.get("local") or not e.get("composer"):
+            continue
+        if down:
+            e["latest_error"] = down
+            continue
+        try:
+            latest = ext_latest(e["composer"], data.get("typo3"))
+        except Exception as ex:
+            e["latest_error"] = str(ex)[:200]
+            if isinstance(ex, (urllib.error.URLError, TimeoutError, OSError)):
+                down = f"Packagist not reachable: {getattr(ex, 'reason', ex)}"[:200]
+                e["latest_error"] = down
+            continue
+        e["latest"] = latest                         # None = not on Packagist, "" = no compatible stable version
+        cur, new = _vparse(e["version"]), _vparse(latest)
+        if cur and new and new[0] > cur[0][:4]:
+            a, b = cur[0], new[0]
+            e["update"] = True
+            e["major"] = b[0] > a[0] or (a[0] == 0 and b[1] > a[1])
+
+
+# ---------------------------------------------------------------- extension changelog (GitHub / GitLab)
+_cl_cache = {}                                       # (composer, version) -> result (tags do not change)
+CL_FILES = ("CHANGELOG.md", "Changelog.md", "changelog.md", "CHANGES.md", "Documentation/Changelog.md",
+            "ChangeLog", "CHANGELOG", "CHANGES")
+
+
+def _http_text(url, accept=None):
+    """GET text; None on 404."""
+    h = {"User-Agent": "gitlab-launcher"}
+    if accept:
+        h["Accept"] = accept
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=20) as r:
+            return r.read(400_000).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise RuntimeError(f"{urllib.parse.urlsplit(url).netloc}: HTTP {e.code}") from None
+
+
+def _md_section(md, version):
+    """Section of a changelog for one version: from its heading to the next heading of the same or higher level."""
+    v = re.escape(version.lstrip("v"))
+    lines = md.splitlines()
+    for i, ln in enumerate(lines):
+        m = re.match(r"(#{1,6})\s+.*?(?<![\d.])v?" + v + r"(?![\d.])", ln)
+        if not m:
+            continue
+        lvl, out = len(m.group(1)), [ln]
+        for nxt in lines[i + 1:]:
+            h = re.match(r"(#{1,6})\s", nxt)
+            if h and len(h.group(1)) <= lvl:
+                break
+            out.append(nxt)
+        return "\n".join(out).strip()
+    # plain text, e.g. "Version 7.5.0, 13 November 2026" ... until the next version line
+    head = re.compile(r"\s*(?:version|release)\s+v?\d|v?\d+\.\d+(?:\.\d+)?(?![\d.])", re.I)
+    for i, ln in enumerate(lines):
+        if re.match(r"\s*(?:(?:version|release)\s+)?v?" + v + r"(?![\d.])", ln, re.I):
+            out = [ln]
+            for nxt in lines[i + 1:]:
+                if head.match(nxt):
+                    break
+                out.append(nxt)
+            return "\n".join(out).strip()
+    return None
+
+
+def ext_changelog(composer, version, installed=""):
+    """Changelog text for one release of a Composer package, from release notes or a changelog file at its tag."""
+    composer = composer.lower()
+    if not re.fullmatch(r"[a-z0-9_.\-]+/[a-z0-9_.\-]+", composer):
+        raise RuntimeError("Invalid package name")
+    key = (composer, version, installed)
+    if key in _cl_cache:
+        return _cl_cache[key]
+    versions = _pkg_versions(composer)
+    if versions is None:
+        raise RuntimeError("Package not found on Packagist")
+    want = _vparse(version)
+    pkg = next((p for p in versions if _vparse(p.get("version", "")) and want
+                and _vparse(p["version"])[0] == want[0] and re.fullmatch(r"v?[\d.]+", p["version"])), None)
+    if not pkg:
+        raise RuntimeError(f"Version {version} not found on Packagist")
+    tag = pkg["version"]
+    src = (pkg.get("source") or {}).get("url") or (pkg.get("support") or {}).get("source") or ""
+    src = re.sub(r"\.git$", "", src.strip().rstrip("/"))
+    m = re.fullmatch(r"https://(github\.com|gitlab\.com)/([\w.\-]+(?:/[\w.\-]+)+)", src)
+    res = {"version": tag, "text": None, "found_in": None, "url": None, "repo": None, "compare": None}
+    if not m:
+        res["repo"] = src or pkg.get("homepage")
+        _cl_cache[key] = res
+        return res
+    host, path = m.groups()
+    repo = f"https://{host}/{path}"
+    res["repo"] = repo
+    old = next((p["version"] for p in versions if installed and _vparse(p.get("version", ""))
+                and _vparse(installed) and _vparse(p["version"])[0] == _vparse(installed)[0]), None)
+    if old and old != tag:
+        res["compare"] = f"{repo}/compare/{old}...{tag}" if host == "github.com" else f"{repo}/-/compare/{old}...{tag}"
+    tags = [tag] + [t for t in (tag.lstrip("v"), "v" + tag.lstrip("v")) if t != tag]
+    # 1) release notes
+    for t in tags:
+        if host == "github.com":
+            raw = _http_text(f"https://api.github.com/repos/{path}/releases/tags/{urllib.parse.quote(t)}",
+                             "application/vnd.github+json")
+            body = json.loads(raw).get("body") if raw else None
+            url = f"{repo}/releases/tag/{t}"
+        else:
+            raw = _http_text(f"https://gitlab.com/api/v4/projects/{urllib.parse.quote(path, safe='')}/releases/{urllib.parse.quote(t)}")
+            body = json.loads(raw).get("description") if raw else None
+            url = f"{repo}/-/releases/{t}"
+        if body and body.strip():
+            res.update(text=body.strip(), found_in="Release notes", url=url)
+            break
+    # 2) changelog file at the tag (section for this version, or a per-version file it links to)
+    if not res["text"]:
+        rawbase = (f"https://raw.githubusercontent.com/{path}/{tag}/" if host == "github.com"
+                   else f"{repo}/-/raw/{tag}/")
+        blob = f"{repo}/blob/{tag}/" if host == "github.com" else f"{repo}/-/blob/{tag}/"
+        for f in CL_FILES:
+            md = _http_text(rawbase + f)
+            if not md:
+                continue
+            sec = _md_section(md, tag)
+            link = None
+            for ln in md.splitlines():               # index line like "* [8.0.0 (date)](Documentation/Changelog/8.0.0.md)"
+                lm = re.search(r"\[[^\]]*?(?<![\d.])v?" + re.escape(tag.lstrip("v")) + r"(?![\d.])[^\]]*\]\(([^)\s]+\.md)\)", ln)
+                if lm and not lm.group(1).startswith(("http:", "https:", "/", "..")):
+                    link = posixpath.normpath(posixpath.join(posixpath.dirname(f), lm.group(1)))
+                    break
+            if link and (not sec or len(sec.splitlines()) <= 2):
+                sub = _http_text(rawbase + link)
+                if sub:
+                    res.update(text=sub.strip(), found_in=link, url=blob + link)
+                    break
+            if sec:
+                res.update(text=sec, found_in=f, url=blob + f)
+                break
+    if res["text"]:
+        res["text"] = res["text"][:30000]
+        res["base"] = res["url"].rsplit("/", 1)[0] + "/"   # for relative links in the text
+    _cl_cache[key] = res
+    return res
+
+
 def _t3m_public(d):
     """Extensions without the project's own ones (rule applied now, also to old snapshots)."""
     return {k: v for k, v in d.get("extensions", {}).items()
@@ -413,18 +695,22 @@ def _t3m_signature(d):
                        sorted((x["id"], x["severity"]) for x in d.get("status", []))])
 
 
-def t3m_fetch(project):
-    pid, url = project["id"], ((project.get("t3monitor") or {}).get("url") or "").strip()
-    key = t3m_key(pid)
-    hf = t3m_history_file(pid)
+def t3m_fetch(project, env="production", alert=True):
+    """Reads one site. alert=True (manual refresh): immediate message on failure / new errors / new extension
+    updates. alert=False (scheduled run): no message here, the run sends one summary (task_t3monitor)."""
+    pid, url = project["id"], (t3m_cfg(project, env).get("url") or "").strip()
+    key = t3m_key(pid, env)
+    hf = t3m_history_file(pid, env)
+    tag = pid if env == "production" else f"{pid} ({env})"
+    site = f"{project.get('name') or pid} ({T3M_ENVS[env]['label']})"
     try:
         if not url or not key:
             raise RuntimeError("t3monitor URL or key missing")
         q = urllib.parse.urlencode({"t3monitor": 1, "secret": key[:32], "reports": T3M_REPORTS})
         headers = {"User-Agent": "gitlab-launcher"}
-        auth_user = (project.get("t3monitor") or {}).get("auth_user") or ""
+        auth_user = t3m_cfg(project, env).get("auth_user") or ""
         if auth_user:
-            cred = f"{auth_user}:{t3m_auth_password(pid)}".encode()
+            cred = f"{auth_user}:{t3m_auth_password(pid, env)}".encode()
             headers["Authorization"] = "Basic " + base64.b64encode(cred).decode()
         req = urllib.request.Request(url.rstrip("/") + "/?" + q, headers=headers)
         try:
@@ -438,15 +724,20 @@ def t3m_fetch(project):
         except urllib.error.URLError as e:
             raise RuntimeError(f"Site not reachable: {e.reason}") from None
         data = t3m_parse(t3m_decrypt(key, raw))
+        t3m_add_updates(data)
     except Exception as e:
         msg = str(e)
         with lock:
             h = load(hf, {"snapshots": []})
-            if h.get("last_error") != msg:
-                log(f"t3monitor {pid}: {msg}")
+            first_fail = h.get("last_error") != msg
+            if first_fail:
+                log(f"t3monitor {tag}: {msg}")
             h.update(last_check=now(), last_error=msg)
-            T3M_DIR.mkdir(exist_ok=True)
+            hf.parent.mkdir(parents=True, exist_ok=True)
             save(hf, h)
+        if first_fail and alert:                          # once per new error text, not on every run
+            notify_event(f"t3monitor check FAILED: {site}", "The TYPO3 status of this site could not be read.",
+                         [("Site", url or "–"), ("Error", msg)], t3m_launcher_link(pid), "Open in launcher")
         raise RuntimeError(msg) from None
     with lock:
         h = load(hf, {"snapshots": []})
@@ -459,21 +750,75 @@ def t3m_fetch(project):
             snaps.insert(0, {"t": now(), "last": now(), "changes": changes, "data": data})
             del snaps[T3M_KEEP:]
             if prev is not None:
-                log(f"t3monitor {pid}: {len(changes)} change(s)")
+                log(f"t3monitor {tag}: {len(changes)} change(s)")
+        # extension updates not reported yet (each extension version once; fixed ones are forgotten)
+        reported = h.get("reported_updates", {})
+        upd = {k: e for k, e in data["extensions"].items() if e.get("update")}
+        new_upd = [k for k, e in upd.items() if reported.get(k) != e["latest"]]
+        h["reported_updates"] = {k: e["latest"] for k, e in upd.items()}
         h.update(last_check=now(), last_error=None)
-        T3M_DIR.mkdir(exist_ok=True)
+        hf.parent.mkdir(parents=True, exist_ok=True)
         save(hf, h)
-    return h
+    new_err = t3m_new_errors(prev, data)
+    if new_err:
+        log(f"t3monitor {tag}: {len(new_err)} new error(s)")
+    if new_upd:
+        log(f"t3monitor {tag}: new extension update(s): " + ", ".join(f"{k} {upd[k]['latest']}" for k in new_upd))
+    if alert and (new_err or new_upd):
+        facts = [(f"Error: {x['title']}", _plain(f"{x['value']} – {x['message']}".strip(" –"), 300)) for x in new_err[:10]]
+        facts += [(f"Update: {k}", _upd_text(upd[k])) for k in new_upd]
+        parts = ([f"{len(new_err)} new error{'s' if len(new_err) > 1 else ''}"] if new_err else []) \
+            + ([f"{len(new_upd)} new extension update{'s' if len(new_upd) > 1 else ''}"] if new_upd else [])
+        notify_event(f"t3monitor: {' and '.join(parts)} on {site}", f"TYPO3 status of {url}.", facts,
+                     t3m_launcher_link(pid), "Open in launcher")
+    return {"site": site, "data": data, "new_err": new_err, "new_upd": new_upd}
 
 
-def t3m_view(pid):
-    h = load(t3m_history_file(pid), {"snapshots": []})
+def _n(n, word):
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _upd_text(e):
+    return f"{e['version']} → {e['latest']}" + (" (MAJOR: may contain breaking changes)" if e.get("major") else "")
+
+
+def t3m_new_errors(prev, data):
+    """Status checks that are 'error' now but were not before. First check = baseline (no message)."""
+    if prev is None:
+        return []
+    was = {x["id"] for x in prev.get("status", []) if x.get("severity") == 2}
+    return [x for x in data.get("status", []) if x.get("severity") == 2 and x["id"] not in was]
+
+
+def t3m_launcher_link(pid):
+    """Link to the project page (localhost only; reachable from the machine running the launcher)."""
+    return f"http://127.0.0.1:{int(config().get('port', 8787))}/#/p/{urllib.parse.quote(pid)}"
+
+
+def t3m_view(pid, env="production"):
+    h = load(t3m_history_file(pid, env), {"snapshots": []})
     snaps = h.get("snapshots", [])
-    return {"key_set": bool(t3m_key(pid)), "last_check": h.get("last_check"), "last_error": h.get("last_error"),
+    return {"env": env, "key_set": bool(t3m_key(pid, env)), "last_check": h.get("last_check"), "last_error": h.get("last_error"),
             "current": snaps[0]["data"] if snaps else None,
             "since": snaps[0]["t"] if snaps else None,
             "history": [{"t": x["t"], "last": x["last"], "changes": x["changes"],
                          "typo3": x["data"].get("typo3")} for x in snaps]}
+
+
+def t3m_summary():
+    """Compact status of every configured instance, for the overview table on the home page."""
+    out = {}
+    for p in config()["projects"]:
+        for env in T3M_ENVS:
+            if not (t3m_cfg(p, env).get("url") and t3m_key(p["id"], env)):
+                continue
+            h = load(t3m_history_file(p["id"], env), {"snapshots": []})
+            c = h["snapshots"][0]["data"] if h.get("snapshots") else {}
+            sev = [x.get("severity") for x in c.get("status", [])]
+            out.setdefault(p["id"], {})[env] = {
+                "typo3": c.get("typo3"), "errors": sev.count(2), "warnings": sev.count(1), "has_data": bool(c),
+                "last_check": h.get("last_check"), "last_error": h.get("last_error")}
+    return out
 
 
 # ---------------------------------------------------------------- GitLab
@@ -677,18 +1022,39 @@ def task_typo3_release():
 
 
 def task_t3monitor():
-    projects = [p for p in config()["projects"] if (p.get("t3monitor") or {}).get("url") and t3m_key(p["id"])]
-    if not projects:
+    sites = [(p, env) for p in config()["projects"] for env in T3M_ENVS
+             if t3m_cfg(p, env).get("url") and t3m_key(p["id"], env)]
+    if not sites:
         return "No project with t3monitor URL and key"
-    failed = []
-    for p in projects:
+    failed, facts, totals = [], [], {"err": 0, "upd": 0, "new": 0}
+    for p, env in sites:
+        name = f"{p['name']} ({T3M_ENVS[env]['label']})"
         try:
-            t3m_fetch(p)
+            r = t3m_fetch(p, env, alert=False)
         except Exception as e:
-            failed.append(f"{p['name']}: {e}")
+            failed.append(f"{name}: {e}")
+            facts.append((name, f"❌ CHECK FAILED: {e}"))
+            continue
+        d, sev = r["data"], [x.get("severity") for x in r["data"].get("status", [])]
+        upd = {k: e for k, e in d["extensions"].items() if e.get("update")}
+        totals["err"] += sev.count(2)
+        totals["upd"] += len(upd)
+        totals["new"] += len(r["new_err"]) + len(r["new_upd"])
+        line = [f"TYPO3 {d.get('typo3') or '?'}", _n(sev.count(2), "error"), _n(sev.count(1), "warning")]
+        if r["new_err"]:
+            line.append("NEW errors: " + ", ".join(x["title"] for x in r["new_err"][:5]))
+        line.append("updates: " + ("; ".join(("NEW " if k in r["new_upd"] else "") + f"{k} {_upd_text(e)}"
+                                              for k, e in upd.items()) if upd else "none"))
+        facts.append((name, " · ".join(line)))
+    head = [_n(len(sites), "site"), _n(totals["err"], "error"), _n(totals["upd"], "extension update")]
     if failed:
-        raise RuntimeError(f"{len(projects) - len(failed)}/{len(projects)} OK. " + " | ".join(failed))
-    return f"{len(projects)}/{len(projects)} project(s) checked"
+        head.insert(1, f"{len(failed)} FAILED")
+    notify_event("t3monitor check: " + " · ".join(head),
+                 "Scheduled TYPO3 status check" + (f" – {totals['new']} new finding(s)." if totals["new"] else "."),
+                 facts, f"http://127.0.0.1:{int(config().get('port', 8787))}/", "Open launcher")
+    if failed:
+        raise RuntimeError(f"{len(sites) - len(failed)}/{len(sites)} OK. " + " | ".join(failed))
+    return f"{len(sites)}/{len(sites)} site(s) checked"
 
 
 TASKS = {
@@ -862,6 +1228,8 @@ class Handler(BaseHTTPRequestHandler):
                     "teams_url_set": bool(teams_url()),
                     "t3monitor_keys": [p["id"] for p in cfg["projects"] if t3m_key(p["id"])],
                     "t3monitor_auth": [p["id"] for p in cfg["projects"] if t3m_auth_password(p["id"])],
+                    "t3monitor_staging_keys": [p["id"] for p in cfg["projects"] if t3m_key(p["id"], "staging")],
+                    "t3monitor_staging_auth": [p["id"] for p in cfg["projects"] if t3m_auth_password(p["id"], "staging")],
                     "last_check": st.get("last_check"),
                     "typo3_latest": st.get("typo3_latest", {}),
                     "typo3_seen": st.get("typo3_seen", {}),
@@ -869,8 +1237,12 @@ class Handler(BaseHTTPRequestHandler):
                     "log": st.get("log", [])[:50]})
             if u.path == "/api/project-info":
                 return self._send(200, project_info(q["gitlab_url"][0], q["path"][0], q.get("ref", [""])[0]))
+            if u.path == "/api/ext/changelog":
+                return self._send(200, ext_changelog(q["composer"][0], q["version"][0], q.get("installed", [""])[0]))
+            if u.path == "/api/t3monitor/summary":
+                return self._send(200, t3m_summary())
             if u.path == "/api/t3monitor":
-                return self._send(200, t3m_view(find_project(q["project"][0])["id"]))
+                return self._send(200, t3m_view(find_project(q["project"][0])["id"], q.get("env", ["production"])[0]))
             if u.path == "/api/search":
                 return self._send(200, search_projects(q["gitlab_url"][0], q["q"][0]))
             if u.path == "/api/pipeline":
@@ -915,18 +1287,22 @@ class Handler(BaseHTTPRequestHandler):
                 log("GitLab token removed from app folder")
                 return self._send(200, {"ok": True})
             if path == "/api/t3monitor/refresh":
-                p = find_project(body["project"])
+                p, env = find_project(body["project"]), body.get("env") or "production"
+                t3m_env(env)
                 try:
-                    t3m_fetch(p)
+                    t3m_fetch(p, env)
                 except RuntimeError:
                     pass                                   # shown via last_error
-                return self._send(200, t3m_view(p["id"]))
+                return self._send(200, t3m_view(p["id"], env))
             if path == "/api/teams":
                 return self._send(200, save_teams(body))
             if path == "/api/teams/test":
-                send_teams("GitLab Launcher: test message", "Teams notifications of the GitLab Launcher work.", [])
-                log("Teams test message sent")
-                return self._send(200, {"msg": "Teams test message sent"})
+                code = send_teams("GitLab Launcher: test message", "Teams notifications of the GitLab Launcher work.",
+                                  [("Sent", now().replace("T", " "))])
+                msg = (f"Teams test message accepted by the webhook (HTTP {code}). If it does not appear in the "
+                       "channel, check the run history of the Workflow in Teams (Workflows → the flow → Run history).")
+                log(msg)
+                return self._send(200, {"msg": msg})
             if path == "/api/email":
                 return self._send(200, save_email(body))
             if path == "/api/email/test":
@@ -953,8 +1329,9 @@ class Handler(BaseHTTPRequestHandler):
                     cfg = config()
                     cfg["projects"] = [p for p in cfg["projects"] if p["id"] != body["id"]]
                     save(CONFIG, cfg)
-                t3m_key_file(body["id"]).unlink(missing_ok=True)
-                t3m_auth_file(body["id"]).unlink(missing_ok=True)
+                for env in T3M_ENVS:
+                    t3m_key_file(body["id"], env).unlink(missing_ok=True)
+                    t3m_auth_file(body["id"], env).unlink(missing_ok=True)
                 log(f"Project removed: {body['id']}")
                 return self._send(200, {"ok": True})
             return self._send(404, {"error": "not found"})
@@ -1058,7 +1435,8 @@ def build_project(b, pid=None):
             "ref": (b.get("prod_ref") or "").strip(),
             "variables": b.get("prod_variables") or {},
             "auto_play": _jobs(b.get("prod_play"))},
-        "t3monitor": {"url": _t3m_url(b.get("t3m_url")), "auth_user": _t3m_user(b.get("t3m_auth_user"))}}
+        **{e["cfg"]: {"url": _t3m_url(b.get(e["form"] + "url")), "auth_user": _t3m_user(b.get(e["form"] + "auth_user"))}
+           for e in T3M_ENVS.values()}}
 
 
 def _t3m_user(v):
@@ -1076,14 +1454,20 @@ def _t3m_url(v):
 
 
 def save_t3m_key(pid, b):
-    if b.get("t3m_key_clear"):
-        t3m_key_file(pid).unlink(missing_ok=True)
-    elif (b.get("t3m_key") or "").strip():
-        t3m_save_key(pid, b["t3m_key"])
-    if b.get("t3m_auth_clear") or not (b.get("t3m_auth_user") or "").strip():
-        t3m_auth_file(pid).unlink(missing_ok=True)     # no user = no basic auth
-    elif b.get("t3m_auth_password"):                   # empty field = keep stored password
-        write_secret(t3m_auth_file(pid), b["t3m_auth_password"])
+    for env, e in T3M_ENVS.items():                          # validate all keys before writing any file
+        k = (b.get(e["form"] + "key") or "").strip()
+        if k and not b.get(e["form"] + "key_clear") and (len(k) != 64 or any(c.isspace() for c in k)):
+            raise RuntimeError(f"t3monitor key ({e['label']}) must be exactly 64 characters")
+    for env, e in T3M_ENVS.items():
+        f = lambda k: b.get(e["form"] + k)
+        if f("key_clear"):
+            t3m_key_file(pid, env).unlink(missing_ok=True)
+        elif (f("key") or "").strip():
+            t3m_save_key(pid, f("key"), env)
+        if f("auth_clear") or not (f("auth_user") or "").strip():
+            t3m_auth_file(pid, env).unlink(missing_ok=True)   # no user = no basic auth
+        elif f("auth_password"):                              # empty field = keep stored password
+            write_secret(t3m_auth_file(pid, env), f("auth_password"))
 
 
 def update_project(b):
