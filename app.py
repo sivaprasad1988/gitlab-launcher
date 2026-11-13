@@ -406,7 +406,7 @@ def _pkg_versions(name):
     hit = _pkg_cache.get(name)
     if hit and time.time() - hit[0] < PKG_TTL:
         return hit[1]
-    req = urllib.request.Request(PACKAGIST + urllib.parse.quote(name) + ".json", headers={"User-Agent": "gitlab-launcher"})
+    req = urllib.request.Request(PACKAGIST + urllib.parse.quote(name) + ".json", headers={"User-Agent": "t3-watchdock"})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             raw = json.loads(r.read()).get("packages", {}).get(name, [])
@@ -540,7 +540,7 @@ CL_FILES = ("CHANGELOG.md", "Changelog.md", "changelog.md", "CHANGES.md", "Docum
 
 def _http_text(url, accept=None):
     """GET text; None on 404."""
-    h = {"User-Agent": "gitlab-launcher"}
+    h = {"User-Agent": "t3-watchdock"}
     if accept:
         h["Accept"] = accept
     try:
@@ -707,7 +707,7 @@ def t3m_fetch(project, env="production", alert=True):
         if not url or not key:
             raise RuntimeError("t3monitor URL or key missing")
         q = urllib.parse.urlencode({"t3monitor": 1, "secret": key[:32], "reports": T3M_REPORTS})
-        headers = {"User-Agent": "gitlab-launcher"}
+        headers = {"User-Agent": "t3-watchdock"}
         auth_user = t3m_cfg(project, env).get("auth_user") or ""
         if auth_user:
             cred = f"{auth_user}:{t3m_auth_password(pid, env)}".encode()
