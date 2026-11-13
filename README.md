@@ -29,6 +29,7 @@ Pure Python standard library, no Python packages. Uses the `openssl` command for
 - **Run history & log** — kept in `state.json` (last 100 runs, 200 log entries)
 - **Save & close** — Scheduler and Settings forms have *Save* (stay on the page) and *Save & close* (back to Projects)
 - **Flash messages** — results and errors appear top right (green ✓ / red ⚠; 6 s, errors 12 s; click to close)
+- **Dark / light theme** — switch in the header: *◐ Auto* (follows the system setting) → *☀ Light* → *☾ Dark*; the choice is saved in the browser (`localStorage`) and applied before the page is drawn
 
 ## Requirements
 
