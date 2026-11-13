@@ -352,6 +352,7 @@ function viewActivity() {
 function viewSettings() {
   const src = {app:"Stored in the app folder (.gitlab-token, chmod 600). It is never shown again.",
     home:"Using ~/.gitlab-token (fallback). Save a token here to store it in the app folder."}[S.token_source] || "No token stored.";
+  const m = S.email;
   $("#view").innerHTML = `
     <div class="head"><h1>Settings</h1></div>
     <div class="stack">
@@ -361,6 +362,25 @@ function viewSettings() {
           <div class="actions" style="align-items:end"><button class="btn" type="submit">Save token</button>
             <button class="btn sec" type="button" data-act="tokentest">Test</button>
             <button class="btn danger" type="button" data-act="tokendel">Remove</button></div>
+        </form></div>
+      <div class="card"><h2>Email notifications</h2>
+        <p class="sub" style="margin:0 0 12px">Sends an email when a pipeline started automatically by the TYPO3 watcher has finished (or could not be started).</p>
+        <form id="eform" class="stack">
+          <label class="check"><input type="checkbox" name="enabled" ${m.enabled ? "checked" : ""}> Send email notifications</label>
+          <div class="fields">
+            <div><label>SMTP host</label><input name="host" value="${esc(m.host)}" placeholder="smtp.example.com"></div>
+            <div><label>Port</label><input name="port" type="number" min="1" max="65535" value="${esc(m.port)}"></div>
+            <div><label>Security</label><select name="security">${[["starttls", "STARTTLS"], ["ssl", "SSL/TLS"], ["none", "None"]]
+              .map(([k, l]) => `<option value="${k}" ${m.security === k ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+            <div><label>SMTP user (empty = no login)</label><input name="user" value="${esc(m.user)}" autocomplete="off"></div>
+            <div><label>SMTP password</label><input name="password" type="password" autocomplete="new-password"
+              placeholder="${S.email_password_set ? "stored – leave empty to keep" : "not stored"}"></div>
+            <div><label>Sender</label><input name="from" value="${esc(m.from)}" placeholder="launcher@example.com"></div>
+            <div><label>Recipients (comma-separated)</label><input name="to" value="${esc(m.to.join(", "))}" placeholder="a@example.com, b@example.com"></div>
+          </div>
+          <div class="actions"><button class="btn" type="submit">Save</button>
+            <button class="btn sec" type="button" data-act="mailtest">Save &amp; send test email</button>
+            ${S.email_password_set ? `<button class="btn danger" type="button" data-act="mailpwdel">Remove password</button>` : ""}</div>
         </form></div>
       <div class="card"><h2>TYPO3 release check</h2><dl>
         <dt>Interval</dt><dd>every ${esc(S.interval)} h (while the launcher runs)</dd>
@@ -373,6 +393,16 @@ function viewSettings() {
     try { const d = await api("/api/token", {token:ev.target.token.value}); ev.target.reset(); await refresh(); viewSettings(); toast(d.msg); }
     catch (e) { toast(e.message, true); }
   };
+  $("#eform").onsubmit = async ev => {
+    ev.preventDefault();
+    try { await saveEmail(); toast("Email settings saved"); } catch (e) { toast(e.message, true); }
+  };
+}
+async function saveEmail(extra) {
+  const f = $("#eform");
+  await api("/api/email", {enabled:f.enabled.checked, host:f.host.value, port:f.port.value, security:f.security.value,
+    user:f.user.value, password:f.password.value, from:f.from.value, to:f.to.value, ...extra});
+  await refresh(); viewSettings();
 }
 
 /* ---------------- actions ---------------- */
@@ -420,6 +450,15 @@ const actions = {
     el.disabled = true;
     try { await api("/api/check-now", {}); await refresh(); viewSettings(); toast("TYPO3 check done"); }
     catch (e) { toast(e.message, true); el.disabled = false; }
+  },
+  async mailtest(el) {
+    el.disabled = true;
+    try { await saveEmail(); toast((await api("/api/email/test", {})).msg); }
+    catch (e) { toast(e.message, true); el.disabled = false; }
+  },
+  async mailpwdel() {
+    if (!confirm("Remove the stored SMTP password?")) return;
+    try { await saveEmail({password:"", clear_password:true}); toast("SMTP password removed"); } catch (e) { toast(e.message, true); }
   },
   async tokentest() { try { toast((await api("/api/token/test", {})).msg); } catch (e) { toast(e.message, true); } },
   async tokendel() {

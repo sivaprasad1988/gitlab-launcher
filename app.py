@@ -10,6 +10,7 @@ import datetime
 import json
 import os
 import re
+import smtplib
 import ssl
 import subprocess
 import sys
@@ -18,6 +19,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -27,6 +29,7 @@ CONFIG = DATA / "config.json"
 STATE = DATA / "state.json"
 TOKEN_FILE = DATA / ".gitlab-token"              # stored by the app (chmod 600)
 TOKEN_FALLBACK = Path.home() / ".gitlab-token"     # optional fallback
+SMTP_PASSWORD_FILE = DATA / ".smtp-password"        # stored by the app (chmod 600)
 HOST = os.environ.get("LAUNCHER_HOST", "127.0.0.1")  # Docker: 0.0.0.0, published on 127.0.0.1 only
 # extra Host header values, e.g. "local-gitlabrunner.local" (Docker publishes it on port 80)
 ALLOWED_HOSTS = {h.strip() for h in os.environ.get("LAUNCHER_ALLOWED_HOSTS", "").split(",") if h.strip()}
@@ -36,6 +39,9 @@ TLS_KEY = os.environ.get("LAUNCHER_TLS_KEY")
 TLS_PORT = int(os.environ.get("LAUNCHER_TLS_PORT", 8443))
 tls_on = False  # set in main() once the HTTPS listener runs
 TYPO3_API = "https://get.typo3.org/api/v1/major/{major}/release/latest"
+FINAL_STATUSES = ("success", "failed", "canceled", "skipped")
+MAIL_WATCH_TIMEOUT = 24 * 3600   # stop waiting for a pipeline to finish after 24 h
+MAIL_WATCH_POLL = 60
 
 lock = threading.RLock()
 stop_event = threading.Event()
@@ -82,6 +88,137 @@ def notify(title, msg):
             check=False, timeout=10, capture_output=True)
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------- email
+def email_cfg():
+    e = config().get("email") or {}
+    return {"enabled": bool(e.get("enabled")), "host": e.get("host", ""), "port": int(e.get("port") or 587),
+            "security": e.get("security", "starttls"), "user": e.get("user", ""),
+            "from": e.get("from", ""), "to": e.get("to", [])}
+
+
+def smtp_password():
+    if SMTP_PASSWORD_FILE.exists():
+        return SMTP_PASSWORD_FILE.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def save_email(b):
+    to = [a.strip() for a in re.split(r"[,;\s]+", b.get("to") or "") if a.strip()]
+    sec = b.get("security", "starttls")
+    if sec not in ("starttls", "ssl", "none"):
+        raise RuntimeError("Security must be starttls, ssl or none")
+    e = {"enabled": bool(b.get("enabled")), "host": (b.get("host") or "").strip(),
+         "port": int(b.get("port") or (465 if sec == "ssl" else 587)), "security": sec,
+         "user": (b.get("user") or "").strip(), "from": (b.get("from") or "").strip(), "to": to}
+    if e["enabled"] and not (e["host"] and e["from"] and to):
+        raise RuntimeError("SMTP host, sender and at least one recipient are required")
+    with lock:
+        cfg = config()
+        cfg["email"] = e
+        save(CONFIG, cfg)
+    pw = b.get("password")
+    if b.get("clear_password"):
+        SMTP_PASSWORD_FILE.unlink(missing_ok=True)
+    elif pw:                                   # empty field = keep stored password
+        fd = os.open(SMTP_PASSWORD_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(pw)
+        os.chmod(SMTP_PASSWORD_FILE, 0o600)
+    log("Email settings saved")
+    return e
+
+
+def send_mail(subject, text, cfg=None):
+    e = cfg or email_cfg()
+    if not (e["host"] and e["from"] and e["to"]):
+        raise RuntimeError("Email not configured (SMTP host, sender, recipients)")
+    msg = EmailMessage()
+    msg["Subject"], msg["From"], msg["To"] = subject, e["from"], ", ".join(e["to"])
+    msg.set_content(text)
+    ctx = ssl.create_default_context()
+    if e["security"] == "ssl":
+        s = smtplib.SMTP_SSL(e["host"], e["port"], timeout=30, context=ctx)
+    else:
+        s = smtplib.SMTP(e["host"], e["port"], timeout=30)
+    with s:
+        if e["security"] == "starttls":
+            s.starttls(context=ctx)
+        if e["user"]:
+            s.login(e["user"], smtp_password())
+        s.send_message(msg)
+
+
+def mail_event(subject, text):
+    """Send a notification mail if enabled; errors only go to the log."""
+    if not email_cfg()["enabled"]:
+        return
+    try:
+        send_mail(subject, text)
+        log(f"Email sent: {subject}")
+    except Exception as e:
+        log(f"Email failed ({subject}): {e}")
+
+
+def _mail_watch_done(pipeline_id):
+    with lock:
+        st = load(STATE, {})
+        st["mail_watch"] = [w for w in st.get("mail_watch", []) if w["pipeline"] != pipeline_id]
+        save(STATE, st)
+
+
+def watch_pipeline_mail(w):
+    """Wait until an auto-triggered pipeline has finished, then send the result mail."""
+    deadline = datetime.datetime.fromisoformat(w["t"]).timestamp() + MAIL_WATCH_TIMEOUT
+    pl, errors = None, 0
+    while not stop_event.is_set():
+        try:
+            project = find_project(w["project"])
+        except RuntimeError:                       # project removed meanwhile
+            return _mail_watch_done(w["pipeline"])
+        try:
+            pl = gitlab(project, "GET", f"/pipelines/{w['pipeline']}")
+            if pl["status"] in FINAL_STATUSES:
+                break
+        except Exception as e:
+            errors += 1
+            if errors in (1, 10):
+                log(f"Mail watch error for pipeline #{w['pipeline']}: {e}")
+        if time.time() > deadline:
+            break
+        stop_event.wait(MAIL_WATCH_POLL)
+    if stop_event.is_set():
+        return                                     # resumed on next start (kept in state.json)
+    status = pl["status"] if pl else "unknown"
+    final = status in FINAL_STATUSES
+    lines = [f"Project:  {project['name']} ({project['path']})",
+             f"Branch:   {project['ref']}",
+             f"Trigger:  {w['trigger']}",
+             f"Pipeline: #{w['pipeline']}",
+             f"Status:   {status}" + ("" if final else " (not finished within 24 h)"),
+             f"Started:  {w['t']}",
+             f"Finished: {(pl or {}).get('finished_at') or '-'}",
+             f"Link:     {(pl or {}).get('web_url') or w.get('web_url') or '-'}"]
+    subject = (f"[GitLab Launcher] TYPO3 update {project['name']}: "
+               f"{status.upper() if final else 'NOT FINISHED (' + status + ')'}")
+    mail_event(subject, "Automatic TYPO3 update pipeline on staging.\n\n" + "\n".join(lines) + "\n")
+    _mail_watch_done(w["pipeline"])
+
+
+def start_mail_watch(project, pl, trigger):
+    w = {"project": project["id"], "pipeline": pl["id"], "web_url": pl.get("web_url"),
+         "trigger": trigger, "t": now()}
+    with lock:
+        st = load(STATE, {})
+        st.setdefault("mail_watch", []).append(w)
+        save(STATE, st)
+    threading.Thread(target=watch_pipeline_mail, args=(w,), daemon=True).start()
+
+
+def resume_mail_watches():
+    for w in load(STATE, {}).get("mail_watch", []):
+        threading.Thread(target=watch_pipeline_mail, args=(w,), daemon=True).start()
 
 
 # ---------------------------------------------------------------- GitLab
@@ -220,18 +357,24 @@ def check_typo3():
                 save(STATE, st)
             log(f"Baseline TYPO3 {v} stored for {p['id']} (no trigger)")
         elif prev != v:
+            trigger = f"TYPO3 {prev} -> {v}"
             try:
-                pl = run_pipeline(p, p["auto_typo3"].get("variables", {}), f"TYPO3 {prev} -> {v}",
+                pl = run_pipeline(p, p["auto_typo3"].get("variables", {}), trigger,
                                   p["auto_typo3"].get("auto_play", []))
                 with lock:
                     st = load(STATE, {})
                     st["typo3_seen"][p["id"]] = v
                     save(STATE, st)
                 notify("TYPO3 update started", f"{p['name']}: {v} (pipeline #{pl['id']})")
+                start_mail_watch(p, pl, trigger)
             except Exception as e:
                 # Not marked as seen -> retried on next check.
                 log(f"Auto-trigger failed for {p['id']} (TYPO3 {v}): {e}")
                 notify("TYPO3 auto-update FAILED", f"{p['name']}: {e}")
+                mail_event(f"[GitLab Launcher] TYPO3 update {p['name']}: NOT STARTED",
+                           f"The automatic TYPO3 update pipeline could not be started.\n\n"
+                           f"Project: {p['name']} ({p['path']})\nBranch:  {p['ref']}\n"
+                           f"Trigger: {trigger}\nError:   {e}\n\nIt is retried on the next check.\n")
 
     with lock:
         st = load(STATE, {})
@@ -301,6 +444,8 @@ class Handler(BaseHTTPRequestHandler):
                     "projects": cfg["projects"],
                     "interval": cfg.get("check_interval_hours", 6),
                     "token_source": token_source()[0],
+                    "email": email_cfg(),
+                    "email_password_set": bool(smtp_password()),
                     "last_check": st.get("last_check"),
                     "typo3_latest": st.get("typo3_latest", {}),
                     "typo3_seen": st.get("typo3_seen", {}),
@@ -351,6 +496,13 @@ class Handler(BaseHTTPRequestHandler):
                 TOKEN_FILE.unlink(missing_ok=True)
                 log("GitLab token removed from app folder")
                 return self._send(200, {"ok": True})
+            if path == "/api/email":
+                return self._send(200, save_email(body))
+            if path == "/api/email/test":
+                e = email_cfg()
+                send_mail("[GitLab Launcher] Test email", "Email notifications of the GitLab Launcher work.\n", e)
+                log(f"Test email sent to {', '.join(e['to'])}")
+                return self._send(200, {"msg": f"Test email sent to {', '.join(e['to'])}"})
             if path == "/api/check-now":
                 check_typo3()
                 return self._send(200, {"ok": True})
@@ -506,6 +658,7 @@ def main():
     srv = ThreadingHTTPServer((HOST, port), Handler)
     if "--no-watch" not in sys.argv:
         threading.Thread(target=watcher, daemon=True).start()
+    resume_mail_watches()
     print(f"GitLab Launcher: http://{HOST}:{port}", flush=True)
     if TLS_CERT and TLS_KEY and not (Path(TLS_CERT).exists() and Path(TLS_KEY).exists()):
         print(f"HTTPS disabled: certificate not found ({TLS_CERT})", flush=True)

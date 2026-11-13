@@ -16,6 +16,7 @@ Pure Python standard library, no dependencies. Runs on `127.0.0.1` only.
 - **TYPO3 watcher** — checks `get.typo3.org` for the latest release of a major version every `check_interval_hours`; on a new version it triggers the pipeline of every project with `auto_typo3.enabled` and shows a macOS notification
   - First check only stores a baseline, it does not trigger
   - Failed triggers are retried on the next check
+- **Email notifications** — when a pipeline started by the TYPO3 watcher has finished (success, failed, canceled, skipped), an email with status and link is sent; also when the auto-trigger could not start the pipeline. SMTP settings in *Settings → Email notifications*
 - **Run history & log** — kept in `state.json` (last 100 runs, 200 log entries)
 
 ## Requirements
@@ -65,8 +66,24 @@ python3 app.py --no-watch    # without TYPO3 watcher
 | `projects[].production.ref` | Production branch; empty = no promote button |
 | `projects[].production.variables` | CI variables for the production run |
 | `projects[].production.auto_play` | Manual jobs to auto-play after the production run |
+| `email.enabled` | Send email notifications for TYPO3 auto-trigger runs |
+| `email.host` / `email.port` / `email.security` | SMTP server; security `starttls`, `ssl` or `none` |
+| `email.user` | SMTP login (empty = no login); password is stored in `.smtp-password` |
+| `email.from` / `email.to` | Sender and list of recipients |
 
 Changing a project's TYPO3 major resets its baseline (no immediate trigger).
+
+## Email notifications
+
+1. *Settings → Email notifications*: enter SMTP host, port, security, optional user/password, sender and recipients, tick *Send email notifications*.
+2. **Save & send test email** checks the settings.
+
+- Only pipelines started automatically by the TYPO3 watcher are watched (not manual runs, Run all or promote).
+- The pipeline status is polled every 60 s; the email is sent once it has finished. After 24 h without a final status an email "NOT FINISHED" is sent.
+- If the pipeline could not be started, an email "NOT STARTED" is sent (on every failed retry).
+- Pending pipelines are kept in `state.json` and watched again after a restart.
+- The SMTP password is stored in `.smtp-password` (file mode `600`), never sent to the browser; leave the field empty to keep it.
+- Send errors are written to the Activity log.
 
 ## Promote to production
 
@@ -146,3 +163,4 @@ Notes:
 | `config.json` | Your configuration (gitignored) |
 | `state.json` | Runs, log, TYPO3 baselines (gitignored) |
 | `.gitlab-token` | GitLab token (gitignored) |
+| `.smtp-password` | SMTP password (gitignored) |
