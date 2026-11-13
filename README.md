@@ -40,7 +40,7 @@ Pure Python standard library, no Python packages. Uses the `openssl` command for
 - **Save & close** — Scheduler and Settings forms have *Save* (stay on the page) and *Save & close* (back to Projects)
 - **Flash messages** — results and errors appear top right (green ✓ / red ⚠; 6 s, errors 12 s; click to close)
 - **Dark / light theme** — switch in the header: *◐ Auto* (follows the system setting) → *☀ Light* → *☾ Dark*; the choice is saved in the browser (`localStorage`) and applied before the page is drawn
-- **Terminal style** — style selector next to the theme switch (*Default* / *Terminal* / *Turbo C++*): monospace font everywhere (system SF Mono/Menlo, no web fonts), square corners, outlined buttons, `$ ~/gitlab launcher` prompt with blinking cursor, `#`/`##` heading prefixes and `./` nav links; *Dark* = phosphor green on black, *Light* = paper terminal; saved per browser
+- **Terminal style** — style selector next to the theme switch (*Default* / *Terminal* / *Turbo C++*): monospace font everywhere (system SF Mono/Menlo, no web fonts), square corners, outlined buttons, `$ ~/t3 watchdock` prompt with blinking cursor, `#`/`##` heading prefixes and `./` nav links; *Dark* = phosphor green on black, *Light* = paper terminal; saved per browser
 - **Turbo C++ style** — third option in the style selector: classic DOS IDE look in the 16-colour CGA palette — grey menu bar with red hotkey letters and green selection, windows with double borders and centered titles, green buttons with shadow, cyan input fields; *Dark* = blue editor screen, *Light* = grey dialog look
 
 ## Requirements

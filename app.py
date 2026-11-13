@@ -232,7 +232,7 @@ def notify_event(title, intro, facts, link=None, link_title="Open pipeline"):
         text = intro + "\n\n" + "\n".join(f"{k + ':':<10}{v}" for k, v in facts) + \
             (f"\n{'Link:':<10}{link}" if link else "") + "\n"
         try:
-            send_mail("[GitLab Launcher] " + title, text)
+            send_mail("[T3 Watchdock] " + title, text)
             log(f"Email sent: {title}")
         except Exception as e:
             log(f"Email failed ({title}): {e}")
@@ -1297,7 +1297,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/teams":
                 return self._send(200, save_teams(body))
             if path == "/api/teams/test":
-                code = send_teams("GitLab Launcher: test message", "Teams notifications of the GitLab Launcher work.",
+                code = send_teams("T3 Watchdock: test message", "Teams notifications of T3 Watchdock work.",
                                   [("Sent", now().replace("T", " "))])
                 msg = (f"Teams test message accepted by the webhook (HTTP {code}). If it does not appear in the "
                        "channel, check the run history of the Workflow in Teams (Workflows → the flow → Run history).")
@@ -1307,7 +1307,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, save_email(body))
             if path == "/api/email/test":
                 e = email_cfg()
-                send_mail("[GitLab Launcher] Test email", "Email notifications of the GitLab Launcher work.\n", e)
+                send_mail("[T3 Watchdock] Test email", "Email notifications of T3 Watchdock work.\n", e)
                 log(f"Test email sent to {', '.join(e['to'])}")
                 return self._send(200, {"msg": f"Test email sent to {', '.join(e['to'])}"})
             if path == "/api/check-now":
@@ -1510,7 +1510,7 @@ def main():
     srv = ThreadingHTTPServer((HOST, port), Handler)
     resume_mail_watches()
     threading.Thread(target=scheduler, daemon=True).start()
-    print(f"GitLab Launcher: http://{HOST}:{port}", flush=True)
+    print(f"T3 Watchdock: http://{HOST}:{port}", flush=True)
     if TLS_CERT and TLS_KEY and not (Path(TLS_CERT).exists() and Path(TLS_KEY).exists()):
         print(f"HTTPS disabled: certificate not found ({TLS_CERT})", flush=True)
     elif TLS_CERT and TLS_KEY:
@@ -1521,7 +1521,7 @@ def main():
         threading.Thread(target=tls.serve_forever, daemon=True).start()
         global tls_on
         tls_on = True
-        print(f"GitLab Launcher: https://{HOST}:{TLS_PORT}", flush=True)
+        print(f"T3 Watchdock: https://{HOST}:{TLS_PORT}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
