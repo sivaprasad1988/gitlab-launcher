@@ -13,10 +13,12 @@ Pure Python standard library, no dependencies. Runs on `127.0.0.1` only.
 - **Promote to production** — after a successful pipeline on the staging branch, start a pipeline on the production branch (see below)
 - **Job view** — pipeline status and jobs; play manual jobs with one click
 - **Auto-play** — listed manual jobs (e.g. `build:main`) are started automatically once they become playable (polled every 15 s, max. 2 h)
-- **TYPO3 watcher** — checks `get.typo3.org` for the latest release of a major version every `check_interval_hours`; on a new version it triggers the pipeline of every project with `auto_typo3.enabled` and shows a macOS notification
+- **TYPO3 watcher** — checks `get.typo3.org` for the latest release of a major version on the schedule set in *Scheduler*; on a new version it triggers the pipeline of every project with `auto_typo3.enabled` and shows a macOS notification
   - First check only stores a baseline, it does not trigger
   - Failed triggers are retried on the next check
 - **Notifications (Microsoft Teams, email)** — when a pipeline started by the TYPO3 watcher has finished (success, failed, canceled, skipped), a Teams message and/or email with status and link is sent; also when the auto-trigger could not start the pipeline. Set up in *Settings*
+- **TYPO3 status (t3monitor)** — reads TYPO3 version, extensions and status checks from sites with the [t3monitor](https://github.com/BrainAppeal/t3monitor) extension; shown on the project page with a change history (see below)
+- **Scheduler** — page to set when the TYPO3 release check and the t3monitor check run: every N hours or daily at a fixed time on chosen weekdays; shows last run, result and next run, with *Run now*
 - **Run history & log** — kept in `state.json` (last 100 runs, 200 log entries)
 
 ## Requirements
@@ -41,7 +43,7 @@ Without Docker (runs only while the terminal is open):
 
 ```bash
 python3 app.py               # with TYPO3 watcher
-python3 app.py --no-watch    # without TYPO3 watcher
+python3 app.py --no-watch    # TYPO3 release check paused (Scheduler)
 ```
 
 ## Configuration
@@ -51,7 +53,8 @@ python3 app.py --no-watch    # without TYPO3 watcher
 | Key | Description |
 |---|---|
 | `port` | HTTP port (default `8787`) |
-| `check_interval_hours` | TYPO3 check interval (default `6`) |
+| `scheduler.<task>` | Schedule per task (`typo3_release`, `t3monitor`): `enabled`, `mode` (`interval`/`daily`), `hours`, `time` (`HH:MM`), `days` (0 = Mon … 6 = Sun); set in the *Scheduler* page |
+| `check_interval_hours` | Old setting: default interval of the TYPO3 release check until a schedule is saved |
 | `projects[].id` | Stable ID, generated from `path` + `ref` |
 | `projects[].name` | Display name |
 | `projects[].gitlab_url` | GitLab base URL |
@@ -67,12 +70,26 @@ python3 app.py --no-watch    # without TYPO3 watcher
 | `projects[].production.variables` | CI variables for the production run |
 | `projects[].production.auto_play` | Manual jobs to auto-play after the production run |
 | `teams.enabled` | Send Teams messages for TYPO3 auto-trigger runs; webhook URL is stored in `.teams-webhook` |
+| `projects[].t3monitor.url` | Site URL with the t3monitor extension; key is stored in `<project-id>.t3monitor-key` |
+| `t3monitor_interval_hours` | Old setting: default interval of the t3monitor check until a schedule is saved |
+| `t3monitor_local_vendors` | Composer vendors of own extensions, hidden and not tracked in history (default `["gingco"]`; `dev-*` versions also count as local) |
 | `email.enabled` | Send email notifications for TYPO3 auto-trigger runs |
 | `email.host` / `email.port` / `email.security` | SMTP server; security `starttls`, `ssl` or `none` |
 | `email.user` | SMTP login (empty = no login); password is stored in `.smtp-password` |
 | `email.from` / `email.to` | Sender and list of recipients |
 
 Changing a project's TYPO3 major resets its baseline (no immediate trigger).
+
+## TYPO3 status (t3monitor)
+
+1. In the TYPO3 site: *Admin Tools → Settings → Extension Configuration → t3monitor → encryption_key* (64 characters).
+2. In the launcher: project → **Edit** → *t3monitor*: site URL and key → **Save changes**.
+3. The project page shows TYPO3 version (compared with the latest release), errors/warnings, extensions, all status checks and the history. **↻ Refresh now** fetches immediately; otherwise on the schedule of the *t3monitor check* task in *Scheduler*.
+
+- Request: `?t3monitor=1&secret=<first 32 chars of the key>`; the answer is AES-encrypted with the last 32 chars (never sent), decrypted with `openssl`.
+- Only technical data is stored (version, extensions, status checks) — no backend users or paths.
+- History in `t3monitor/<project-id>.json`: a new entry only when something changes (TYPO3 version, extension added/removed/updated, status severity); otherwise "seen until" is updated. Last 300 changes are kept.
+- Key file: mode `600`, never sent to the browser, removed with the project.
 
 ## Notifications (Microsoft Teams, email)
 
@@ -170,3 +187,5 @@ Notes:
 | `.gitlab-token` | GitLab token (gitignored) |
 | `.smtp-password` | SMTP password (gitignored) |
 | `.teams-webhook` | Teams webhook URL (gitignored) |
+| `*.t3monitor-key` | t3monitor key per project (gitignored) |
+| `t3monitor/` | t3monitor history per project (gitignored) |

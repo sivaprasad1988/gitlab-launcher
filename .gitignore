@@ -8,3 +8,5 @@ config.json
 certs/
 .smtp-password
 .teams-webhook
+*.t3monitor-key
+t3monitor/

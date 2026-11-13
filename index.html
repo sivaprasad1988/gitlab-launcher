@@ -73,6 +73,21 @@ input:focus,select:focus{outline:2px solid var(--acc);outline-offset:-1px}
 #toast{position:fixed;right:16px;bottom:16px;max-width:420px;background:var(--fg);color:var(--bg);padding:10px 14px;border-radius:8px;font-size:13px;opacity:0;transform:translateY(8px);transition:.2s;pointer-events:none;z-index:9}
 #toast.show{opacity:1;transform:none}#toast.err{background:var(--err);color:#fff}
 code{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.full{margin-top:16px}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:2px 9px;border-radius:10px;background:var(--chip);color:var(--fg)}
+.sev-2{color:var(--err)}.sev-1{color:var(--run)}.sev0{color:var(--ok)}.sev--1,.sev--2{color:var(--mut)}
+.badge.sev-2{background:color-mix(in srgb,var(--err) 14%,transparent)}.badge.sev-1{background:color-mix(in srgb,var(--run) 14%,transparent)}
+.badge.sev0{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.kpi{border:1px solid var(--bd);border-radius:10px;padding:10px 12px}
+.kpi .v{font-size:18px;font-weight:700;margin-top:2px}
+details{border-top:1px solid var(--bd);padding-top:10px;margin-top:14px}
+summary{cursor:pointer;font-weight:600;font-size:14px;margin-bottom:8px}
+.msg{color:var(--mut);font-size:12px;margin-top:2px}
+.tl{list-style:none;margin:0;padding:0}
+.tl li{padding:8px 0 8px 14px;border-left:2px solid var(--bd);margin-left:4px}
+.tl .when{font-size:12px;color:var(--mut)}
+.tl ul{margin:4px 0 0;padding-left:18px;font-size:13px}
 </style>
 </head>
 <body>
@@ -81,6 +96,7 @@ code{font-family:ui-monospace,Menlo,monospace;font-size:12px}
   <nav>
     <a href="#/" data-nav="projects">Projects</a>
     <a href="#/activity" data-nav="activity">Activity</a>
+    <a href="#/scheduler" data-nav="scheduler">Scheduler</a>
     <a href="#/settings" data-nav="settings">Settings</a>
   </nav>
   <span class="pill" id="tokenPill">…</span>
@@ -130,6 +146,7 @@ async function render() {
   if (a === "new") return viewForm();
   if (a === "activity") return viewActivity();
   if (a === "settings") return viewSettings();
+  if (a === "scheduler") return viewScheduler();
   if (a === "p" && b) {
     const p = proj(decodeURIComponent(b));
     if (!p) return $("#view").innerHTML = `<p class="empty">Project not found. <a href="#/">Back</a></p>`;
@@ -200,9 +217,72 @@ function viewProject(p, pipelineId) {
           <p class="sub" style="margin:0 0 10px">Removes the project from the launcher only. Nothing changes in GitLab.</p>
           <button class="btn danger sm" data-act="del">Remove project</button></div>
       </div>
-    </div>`;
+    </div>
+    <div class="card full" id="t3m"><h2>TYPO3 status (t3monitor)</h2><p class="empty">Loading…</p></div>`;
   $("#view").dataset.project = p.id;
   if (pid) loadPipeline(p, pid);
+  loadT3m(p);
+}
+
+const SEV = {"-2":"notice", "-1":"info", "0":"ok", "1":"warning", "2":"error"};
+const sevBadge = n => `<span class="badge sev${Number(n)}">${esc(SEV[n] || n)}</span>`;
+const verCmp = (a, b) => { const x = String(a).split("."), y = String(b).split(".");
+  for (let i = 0; i < 3; i++) { const d = (parseInt(x[i]) || 0) - (parseInt(y[i]) || 0); if (d) return d; } return 0; };
+
+async function loadT3m(p, refreshNow) {
+  const box = $("#t3m"); if (!box) return;
+  const url = p.t3monitor?.url;
+  if (!url || !S.t3monitor_keys.includes(p.id)) {
+    box.innerHTML = `<h2>TYPO3 status (t3monitor)</h2><p class="empty">Not configured. Add the t3monitor URL and key under
+      <a href="${pUrl(p)}/edit">Edit</a> to see TYPO3 version, extensions, status checks and their history.</p>`;
+    return;
+  }
+  let d;
+  try { d = refreshNow ? await api("/api/t3monitor/refresh", {project:p.id}) : await api(`/api/t3monitor?project=${encodeURIComponent(p.id)}`); }
+  catch (e) { box.innerHTML = `<h2>TYPO3 status (t3monitor)</h2><p class="empty">Error: ${esc(e.message)}</p>`; return; }
+  if (!$("#t3m") || $("#view").dataset.project !== p.id) return;
+  const c = d.current, head = `<div class="head" style="margin-bottom:12px"><div><h2 style="margin:0">TYPO3 status (t3monitor)</h2>
+      <div class="sub">${c ? esc(c.site_name) + " · " : ""}<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)} ↗</a>
+      · last check ${esc(fmt(d.last_check))} · <a href="#/scheduler">schedule: ${esc(S.scheduler.find(t => t.id === "t3monitor")?.cfg.enabled === false ? "off" : S.scheduler.find(t => t.id === "t3monitor")?.schedule)}</a></div></div>
+      <button class="btn sec sm" data-act="t3mrefresh">↻ Refresh now</button></div>
+    ${d.last_error ? `<p class="sev-2" style="margin:0 0 12px;font-size:13px">Last check failed: ${esc(d.last_error)}</p>` : ""}`;
+  if (!c) { box.innerHTML = head + `<p class="empty">No data yet. Click “Refresh now”.</p>`; return; }
+  const counts = {}; c.status.forEach(x => counts[x.severity] = (counts[x.severity] || 0) + 1);
+  const major = String(c.typo3 || "").split(".")[0], latest = S.typo3_latest[major];
+  const upd = latest && c.typo3 && verCmp(latest, c.typo3) > 0;
+  const problems = c.status.filter(x => x.severity >= 1).sort((a, b) => b.severity - a.severity);
+  const exts = Object.entries(c.extensions).filter(([, e]) => !e.local), local = Object.entries(c.extensions).filter(([, e]) => e.local);
+  const row = x => `<tr><td>${sevBadge(x.severity)}</td><td>${esc(x.group)}</td><td><b>${esc(x.title)}</b>
+      ${x.message ? `<div class="msg">${esc(x.message)}</div>` : ""}</td><td>${esc(x.value)}</td></tr>`;
+  box.innerHTML = head + `
+    <div class="kpis">
+      <div class="kpi"><div class="sub">TYPO3</div><div class="v">${esc(c.typo3 || "?")}</div>
+        <div class="sub ${upd ? "sev-1" : "sev0"}">${latest ? (upd ? `update available: ${esc(latest)}` : `latest (${esc(latest)})`) : "latest unknown"}</div></div>
+      <div class="kpi"><div class="sub">Errors</div><div class="v sev-2">${counts[2] || 0}</div></div>
+      <div class="kpi"><div class="sub">Warnings</div><div class="v sev-1">${counts[1] || 0}</div></div>
+      <div class="kpi"><div class="sub">OK checks</div><div class="v sev0">${counts[0] || 0}</div></div>
+      <div class="kpi"><div class="sub">Extensions</div><div class="v">${exts.length}</div>${local.length ? `<div class="sub">+ ${local.length} local (hidden)</div>` : ""}</div>
+      <div class="kpi"><div class="sub">Unchanged since</div><div class="v" style="font-size:14px">${esc(fmt(d.since))}</div></div>
+    </div>
+    <h2>Problems</h2>
+    ${problems.length ? `<div class="wrap"><table><thead><tr><th>Severity</th><th>Area</th><th>Check</th><th>Value</th></tr></thead>
+      <tbody>${problems.map(row).join("")}</tbody></table></div>` : `<p class="empty">No errors or warnings.</p>`}
+    <details><summary>Extensions (${exts.length})</summary>
+      ${local.length ? `<label class="check" style="margin-bottom:8px"><input type="checkbox" id="showLocal"> Show local extensions (${local.length}): ${esc(local.map(([k]) => k).join(", "))}</label>` : ""}
+      <div class="wrap"><table>
+      <thead><tr><th>Extension</th><th>Title</th><th>Version</th><th>Composer package</th></tr></thead><tbody>
+      ${[...exts, ...local].map(([k, e]) => `<tr ${e.local ? `class="local" hidden` : ""}><td><code>${esc(k)}</code>${e.local ? ` <span class="chip">local</span>` : ""}</td>
+        <td>${esc(e.title)}</td><td>${esc(e.version)}</td><td>${esc(e.composer)}</td></tr>`).join("")}
+      </tbody></table></div></details>
+    <details><summary>All status checks (${c.status.length})</summary><div class="wrap"><table>
+      <thead><tr><th>Severity</th><th>Area</th><th>Check</th><th>Value</th></tr></thead>
+      <tbody>${c.status.slice().sort((a, b) => b.severity - a.severity).map(row).join("")}</tbody></table></div></details>
+    <details open><summary>History (${d.history.length} change${d.history.length === 1 ? "" : "s"})</summary><ul class="tl">
+      ${d.history.map(h => `<li><div class="when">${esc(fmt(h.t))}${h.last !== h.t ? ` – seen until ${esc(fmt(h.last))}` : ""} · TYPO3 ${esc(h.typo3 || "?")}</div>
+        <ul>${h.changes.map(x => `<li>${esc(x)}</li>`).join("")}</ul></li>`).join("")}
+    </ul></details>`;
+  const sl = $("#showLocal");
+  if (sl) sl.onchange = () => box.querySelectorAll("tr.local").forEach(r => r.hidden = !sl.checked);
 }
 
 async function loadPipeline(p, pid) {
@@ -270,6 +350,14 @@ function viewForm(p) {
         <div><label>Auto-play manual jobs</label><input name="prod_play" value="${esc((v.production ? v.production.auto_play || [] : v.auto_play || []).join(", "))}">
           <div class="hint">Pre-filled from the jobs above; edit to differ.</div></div>
       </div></div>
+      <div class="card"><div class="sec-title">t3monitor</div><div class="fields">
+        <div><label>Site URL</label><input name="t3m_url" value="${esc(v.t3monitor?.url)}" placeholder="https://www.example.com/">
+          <div class="hint">TYPO3 site with the t3monitor extension installed.</div></div>
+        <div><label>t3monitor key (64 characters)</label><input name="t3m_key" type="password" autocomplete="new-password"
+          placeholder="${p && S.t3monitor_keys.includes(p.id) ? "stored – leave empty to keep" : "not stored"}">
+          <div class="hint">Extension configuration → t3monitor → encryption_key. Stored server-side only.</div>
+          ${p && S.t3monitor_keys.includes(p.id) ? `<label class="check" style="margin-top:6px"><input type="checkbox" name="t3m_key_clear"> Remove stored key</label>` : ""}</div>
+      </div></div>
       <div class="actions"><button class="btn" type="submit">${p ? "Save changes" : "Create project"}</button>
         <a class="btn sec" href="${p ? pUrl(p) : "#/"}">Cancel</a></div>
     </form>`;
@@ -323,7 +411,8 @@ function viewForm(p) {
       variables:parseVars(f.get("variables")), auto_play:f.get("auto_play"),
       auto_enabled:f.get("auto_enabled") === "on", major:f.get("major"),
       auto_variables:parseVars(f.get("auto_variables")), auto_typo3_play:f.get("auto_typo3_play"),
-      prod_ref:f.get("prod_ref"), prod_variables:parseVars(f.get("prod_variables")), prod_play:f.get("prod_play")};
+      prod_ref:f.get("prod_ref"), prod_variables:parseVars(f.get("prod_variables")), prod_play:f.get("prod_play"),
+      t3m_url:f.get("t3m_url"), t3m_key:f.get("t3m_key"), t3m_key_clear:f.get("t3m_key_clear") === "on"};
     try {
       const saved = p ? await api("/api/projects/update", {...body, id:p.id}) : await api("/api/projects", body);
       await refresh(); toast(p ? "Project saved" : "Project created"); location.hash = pUrl(saved);
@@ -396,7 +485,7 @@ function viewSettings() {
             ${S.email_password_set ? `<button class="btn danger" type="button" data-act="mailpwdel">Remove password</button>` : ""}</div>
         </form></div>
       <div class="card"><h2>TYPO3 release check</h2><dl>
-        <dt>Interval</dt><dd>every ${esc(S.interval)} h (while the launcher runs)</dd>
+        <dt>Schedule</dt><dd>${esc(S.scheduler.find(t => t.id === "typo3_release").schedule)} · <a href="#/scheduler">change in Scheduler</a></dd>
         <dt>Last check</dt><dd>${esc(fmt(S.last_check))}</dd>
         <dt>Latest</dt><dd>${Object.entries(S.typo3_latest).map(([m, v]) => `TYPO3 ${esc(m)}: ${esc(v)}`).join(", ") || "–"}</dd>
       </dl><div style="margin-top:12px"><button class="btn sec" data-act="check">Check now</button></div></div>
@@ -425,6 +514,49 @@ async function saveEmail(extra) {
   await api("/api/email", {enabled:f.enabled.checked, host:f.host.value, port:f.port.value, security:f.security.value,
     user:f.user.value, password:f.password.value, from:f.from.value, to:f.to.value, ...extra});
   await refresh(); viewSettings();
+}
+
+function viewScheduler() {
+  const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  $("#view").innerHTML = `
+    <div class="head"><div><h1>Scheduler</h1><div class="sub">Automatic tasks; they run while the launcher runs. A run missed while it was off starts right after the next start.</div></div></div>
+    <div class="stack">${S.scheduler.map(t => { const c = t.cfg; return `
+      <form class="card" data-task="${esc(t.id)}">
+        <div class="head" style="margin-bottom:8px"><div><h2 style="margin:0">${esc(t.name)}</h2><div class="sub">${esc(t.description)}</div></div>
+          <button class="btn sec sm" type="button" data-act="schedrun" data-id="${esc(t.id)}" ${t.running ? "disabled" : ""}>${t.running ? "Running…" : "▶ Run now"}</button></div>
+        <dl style="margin-bottom:14px">
+          <dt>Status</dt><dd>${t.blocked ? `<span class="sev-1">paused (launcher started with --no-watch)</span>` : c.enabled ? `<span class="sev0">active</span> · ${esc(t.schedule)}` : `<span class="sev--1">off</span>`}</dd>
+          <dt>Last run</dt><dd>${t.last_run ? `${esc(fmt(t.last_run))} · <span class="${t.ok ? "sev0" : "sev-2"}">${t.ok ? "OK" : "failed"}</span>` : "never"}</dd>
+          ${t.result ? `<dt>Result</dt><dd>${esc(t.result)}</dd>` : ""}
+          <dt>Next run</dt><dd>${t.next_run && !t.blocked ? esc(fmt(t.next_run)) : "–"}</dd>
+        </dl>
+        <label class="check"><input type="checkbox" name="enabled" ${c.enabled ? "checked" : ""}> Enabled</label>
+        <div class="fields" style="margin-top:12px">
+          <div><label>Schedule</label><select name="mode">
+            <option value="interval" ${c.mode === "interval" ? "selected" : ""}>Every N hours</option>
+            <option value="daily" ${c.mode === "daily" ? "selected" : ""}>Daily at a fixed time</option></select></div>
+          <div data-for="interval"><label>Every (hours)</label><input name="hours" type="number" min="0.25" max="168" step="0.25" value="${esc(c.hours)}"></div>
+          <div data-for="daily"><label>Time</label><input name="time" type="time" value="${esc(c.time)}"></div>
+        </div>
+        <div data-for="daily" style="margin-top:12px"><label>Weekdays</label><div class="actions">
+          ${days.map((d, i) => `<label class="check"><input type="checkbox" name="day" value="${i}" ${c.days.includes(i) ? "checked" : ""}> ${d}</label>`).join("")}</div></div>
+        <div class="actions" style="margin-top:14px"><button class="btn" type="submit">Save</button></div>
+      </form>`; }).join("")}
+    </div>`;
+  viewScheduler.dirty = false;
+  document.querySelectorAll("form[data-task]").forEach(f => {
+    f.oninput = () => viewScheduler.dirty = true;
+    const sync = () => f.querySelectorAll("[data-for]").forEach(el => el.hidden = el.dataset.for !== f.mode.value);
+    f.mode.onchange = sync; sync();
+    f.onsubmit = async ev => {
+      ev.preventDefault();
+      try {
+        await api("/api/scheduler", {id:f.dataset.task, enabled:f.enabled.checked, mode:f.mode.value, hours:f.hours.value,
+          time:f.time.value, days:[...f.querySelectorAll("[name=day]:checked")].map(x => Number(x.value))});
+        await refresh(); viewScheduler(); toast("Schedule saved");
+      } catch (e) { toast(e.message, true); }
+    };
+  });
 }
 
 /* ---------------- actions ---------------- */
@@ -491,6 +623,15 @@ const actions = {
     if (!confirm("Remove the stored SMTP password?")) return;
     try { await saveEmail({password:"", clear_password:true}); toast("SMTP password removed"); } catch (e) { toast(e.message, true); }
   },
+  async schedrun(el) {
+    el.disabled = true; el.textContent = "Running…";
+    try { const r = await api("/api/scheduler/run", {id:el.dataset.id}); await refresh(); viewScheduler(); toast(r.result, !r.ok); }
+    catch (e) { toast(e.message, true); el.disabled = false; el.textContent = "▶ Run now"; }
+  },
+  async t3mrefresh(el) {
+    el.disabled = true; el.textContent = "Checking…";
+    await loadT3m(proj($("#view").dataset.project), true);
+  },
   async tokentest() { try { toast((await api("/api/token/test", {})).msg); } catch (e) { toast(e.message, true); } },
   async tokendel() {
     if (!confirm("Remove the stored GitLab token?")) return;
@@ -508,6 +649,7 @@ setInterval(async () => {          // refresh list views only; never interrupt f
   const h = location.hash.slice(1) || "/";
   await refresh();
   if (h === "/" ) viewProjects(); else if (h === "/activity") viewActivity();
+  else if (h === "/scheduler" && !viewScheduler.dirty) viewScheduler();
 }, 30000);
 </script>
 </body>

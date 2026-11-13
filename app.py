@@ -6,7 +6,10 @@
   pipelines of all projects with "auto_typo3.enabled" (intended: staging only).
 - Token is read server-side from ~/.gitlab-token and never sent to the browser.
 """
+import base64
 import datetime
+import hashlib
+import html
 import json
 import os
 import re
@@ -19,6 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,6 +35,10 @@ TOKEN_FILE = DATA / ".gitlab-token"              # stored by the app (chmod 600)
 TOKEN_FALLBACK = Path.home() / ".gitlab-token"     # optional fallback
 SMTP_PASSWORD_FILE = DATA / ".smtp-password"        # stored by the app (chmod 600)
 TEAMS_FILE = DATA / ".teams-webhook"                # Teams webhook URL, a secret (chmod 600)
+T3M_DIR = DATA / "t3monitor"                        # t3monitor history per project
+T3M_REPORTS = "internal,security,installed_extensions"
+T3M_KEEP = 300                                      # snapshots (= changes) kept per project
+SEVERITY = {-2: "notice", -1: "info", 0: "ok", 1: "warning", 2: "error"}
 HOST = os.environ.get("LAUNCHER_HOST", "127.0.0.1")  # Docker: 0.0.0.0, published on 127.0.0.1 only
 # extra Host header values, e.g. "local-gitlabrunner.local" (Docker publishes it on port 80)
 ALLOWED_HOSTS = {h.strip() for h in os.environ.get("LAUNCHER_ALLOWED_HOSTS", "").split(",") if h.strip()}
@@ -284,6 +292,173 @@ def resume_mail_watches():
         threading.Thread(target=watch_pipeline_mail, args=(w,), daemon=True).start()
 
 
+# ---------------------------------------------------------------- t3monitor
+def t3m_key_file(pid):
+    if not re.fullmatch(r"[\w.\-]+", pid):
+        raise RuntimeError(f"Invalid project id: {pid}")
+    return DATA / f"{pid}.t3monitor-key"
+
+
+def t3m_key(pid):
+    f = t3m_key_file(pid)
+    return f.read_text(encoding="utf-8").strip() if f.exists() else ""
+
+
+def t3m_save_key(pid, key):
+    key = (key or "").strip()
+    if len(key) != 64 or any(c.isspace() for c in key):
+        raise RuntimeError("t3monitor key must be exactly 64 characters")
+    write_secret(t3m_key_file(pid), key)
+
+
+def t3m_history_file(pid):
+    t3m_key_file(pid)                                    # validates pid
+    return T3M_DIR / f"{pid}.json"
+
+
+def t3m_decrypt(key, raw):
+    """Same derivation as BrainAppeal\\T3monitor\\Helper\\Encryption::decryptOpenSsl."""
+    if not raw.startswith("01:"):
+        raise RuntimeError(f"Unexpected t3monitor answer: {raw[:200]}")
+    k = hashlib.sha256(key[32:48].encode()).hexdigest()
+    iv = hashlib.sha256(k[16:].encode()).hexdigest()[:16]
+    r = subprocess.run(["openssl", "enc", "-d", "-aes-128-cbc", "-K", k[:16].encode().hex(),
+                        "-iv", iv.encode().hex()], input=base64.b64decode(raw[3:]),
+                       capture_output=True, timeout=30)
+    if r.returncode:
+        raise RuntimeError("t3monitor answer could not be decrypted (wrong key?)")
+    return r.stdout.decode("utf-8", errors="replace")
+
+
+def _plain(s, limit=400):
+    s = html.unescape(re.sub(r"<[^>]+>", " ", html.unescape(s or "")))
+    return re.sub(r"\s+", " ", s).strip()[:limit]
+
+
+def t3m_is_local(composer, version):
+    """Project's own extensions: own composer vendor or a dev branch (e.g. dev-main)."""
+    vendors = config().get("t3monitor_local_vendors", ["gingco"])
+    return composer.split("/")[0] in vendors or version.startswith("dev-")
+
+
+def t3m_parse(xml):
+    """Keep only technical data (no backend users, no paths)."""
+    root = ET.fromstring(xml)
+    exts = {}
+    for e in root.find("installed_extensions") if root.find("installed_extensions") is not None else []:
+        if e.findtext("ext"):
+            version, composer = (e.findtext("version") or "").strip(), (e.findtext("composer/name") or "").strip()
+            exts[e.findtext("ext")] = {"version": version, "title": _plain(e.findtext("title"), 120),
+                                       "composer": composer, "local": t3m_is_local(composer, version)}
+    status, version = [], None
+    for g in root.find("reports") if root.find("reports") is not None else []:
+        for i in g:
+            iid = f"{g.tag}/{i.get('index', i.tag) if i.tag == 'numIndex' else i.tag}"
+            try:
+                sev = int(i.findtext("severity") or 0)
+            except ValueError:
+                sev = 0
+            value = _plain(i.findtext("value"), 200)
+            if g.tag == "typo3" and i.tag == "Typo3Version":
+                version = value
+            status.append({"id": iid, "group": g.tag, "title": _plain(i.findtext("title"), 150) or i.tag,
+                           "value": value, "severity": sev, "message": _plain(i.findtext("message"))})
+    return {"site_name": _plain(root.findtext("site_name"), 200), "typo3": version,
+            "extensions": dict(sorted(exts.items())), "status": status}
+
+
+def _t3m_public(d):
+    """Extensions without the project's own ones (rule applied now, also to old snapshots)."""
+    return {k: v for k, v in d.get("extensions", {}).items()
+            if not t3m_is_local(v.get("composer", ""), v.get("version", ""))}
+
+
+def t3m_changes(old, new):
+    if old is None:
+        return ["First check"]
+    ch = []
+    if old.get("typo3") != new.get("typo3"):
+        ch.append(f"TYPO3 {old.get('typo3') or '?'} → {new.get('typo3') or '?'}")
+    oe, ne = _t3m_public(old), _t3m_public(new)
+    for k in sorted(set(oe) | set(ne)):
+        if k not in oe:
+            ch.append(f"Extension added: {k} {ne[k]['version']}")
+        elif k not in ne:
+            ch.append(f"Extension removed: {k} {oe[k]['version']}")
+        elif oe[k]["version"] != ne[k]["version"]:
+            ch.append(f"Extension {k}: {oe[k]['version']} → {ne[k]['version']}")
+    os_ = {x["id"]: x for x in old.get("status", [])}
+    for x in new.get("status", []):
+        o = os_.get(x["id"])
+        if o and o["severity"] != x["severity"]:
+            ch.append(f"Status '{x['title']}': {SEVERITY.get(o['severity'], o['severity'])} → "
+                      f"{SEVERITY.get(x['severity'], x['severity'])}")
+        elif not o and x["severity"] >= 1:
+            ch.append(f"New {SEVERITY[x['severity']]}: {x['title']}")
+    return ch
+
+
+def _t3m_signature(d):
+    """Fields that define a change (status values like times are ignored)."""
+    return json.dumps([d.get("typo3"), {k: v["version"] for k, v in _t3m_public(d).items()},
+                       sorted((x["id"], x["severity"]) for x in d.get("status", []))])
+
+
+def t3m_fetch(project):
+    pid, url = project["id"], ((project.get("t3monitor") or {}).get("url") or "").strip()
+    key = t3m_key(pid)
+    hf = t3m_history_file(pid)
+    try:
+        if not url or not key:
+            raise RuntimeError("t3monitor URL or key missing")
+        q = urllib.parse.urlencode({"t3monitor": 1, "secret": key[:32], "reports": T3M_REPORTS})
+        req = urllib.request.Request(url.rstrip("/") + "/?" + q, headers={"User-Agent": "gitlab-launcher"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                raw = r.read().decode("utf-8", errors="replace").strip()
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"HTTP {e.code}: {_plain(e.read().decode(errors='replace'), 200)}") from None
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Site not reachable: {e.reason}") from None
+        data = t3m_parse(t3m_decrypt(key, raw))
+    except Exception as e:
+        msg = str(e)
+        with lock:
+            h = load(hf, {"snapshots": []})
+            if h.get("last_error") != msg:
+                log(f"t3monitor {pid}: {msg}")
+            h.update(last_check=now(), last_error=msg)
+            T3M_DIR.mkdir(exist_ok=True)
+            save(hf, h)
+        raise RuntimeError(msg) from None
+    with lock:
+        h = load(hf, {"snapshots": []})
+        snaps = h["snapshots"]
+        prev = snaps[0]["data"] if snaps else None
+        if prev is not None and _t3m_signature(prev) == _t3m_signature(data):
+            snaps[0].update(last=now(), data=data)        # unchanged: refresh values + last seen
+        else:
+            changes = t3m_changes(prev, data)
+            snaps.insert(0, {"t": now(), "last": now(), "changes": changes, "data": data})
+            del snaps[T3M_KEEP:]
+            if prev is not None:
+                log(f"t3monitor {pid}: {len(changes)} change(s)")
+        h.update(last_check=now(), last_error=None)
+        T3M_DIR.mkdir(exist_ok=True)
+        save(hf, h)
+    return h
+
+
+def t3m_view(pid):
+    h = load(t3m_history_file(pid), {"snapshots": []})
+    snaps = h.get("snapshots", [])
+    return {"key_set": bool(t3m_key(pid)), "last_check": h.get("last_check"), "last_error": h.get("last_error"),
+            "current": snaps[0]["data"] if snaps else None,
+            "since": snaps[0]["t"] if snaps else None,
+            "history": [{"t": x["t"], "last": x["last"], "changes": x["changes"],
+                         "typo3": x["data"].get("typo3")} for x in snaps]}
+
+
 # ---------------------------------------------------------------- GitLab
 def token_source():
     for name, f in (("app", TOKEN_FILE), ("home", TOKEN_FALLBACK)):
@@ -447,14 +622,145 @@ def check_typo3():
         save(STATE, st)
 
 
-def watcher():
-    while not stop_event.is_set():
+# ---------------------------------------------------------------- scheduler
+NO_WATCH = "--no-watch" in sys.argv
+DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+sched_running = set()
+
+
+def task_typo3_release():
+    check_typo3()
+    latest = load(STATE, {}).get("typo3_latest", {})
+    return "Latest: " + (", ".join(f"TYPO3 {m}: {v}" for m, v in sorted(latest.items())) or "no project with TYPO3 auto-update")
+
+
+def task_t3monitor():
+    projects = [p for p in config()["projects"] if (p.get("t3monitor") or {}).get("url") and t3m_key(p["id"])]
+    if not projects:
+        return "No project with t3monitor URL and key"
+    failed = []
+    for p in projects:
         try:
-            check_typo3()
+            t3m_fetch(p)
         except Exception as e:
-            log(f"Watcher error: {e}")
-        hours = float(config().get("check_interval_hours", 6))
-        stop_event.wait(hours * 3600)
+            failed.append(f"{p['name']}: {e}")
+    if failed:
+        raise RuntimeError(f"{len(projects) - len(failed)}/{len(projects)} OK. " + " | ".join(failed))
+    return f"{len(projects)}/{len(projects)} project(s) checked"
+
+
+TASKS = {
+    "typo3_release": {"name": "TYPO3 release check", "run": task_typo3_release, "legacy": "check_interval_hours",
+                      "description": "Checks get.typo3.org for new TYPO3 releases; on a new version the update "
+                                     "pipeline of every project with TYPO3 auto-update is started."},
+    "t3monitor": {"name": "t3monitor check (TYPO3 & extensions)", "run": task_t3monitor, "legacy": "t3monitor_interval_hours",
+                  "description": "Reads TYPO3 version, extensions and status checks of every project with "
+                                 "t3monitor URL and key, and records changes in the history."},
+}
+
+
+def sched_cfg(tid):
+    c = config()
+    d = {"enabled": True, "mode": "interval", "hours": float(c.get(TASKS[tid]["legacy"], 6)),
+         "time": "07:00", "days": list(range(7))}
+    d.update((c.get("scheduler") or {}).get(tid) or {})
+    return d
+
+
+def sched_describe(c):
+    if c["mode"] == "daily":
+        days = "every day" if len(c["days"]) == 7 else ", ".join(DAYS[d] for d in sorted(c["days"]))
+        return f"daily at {c['time']} ({days})"
+    return f"every {c['hours']:g} h"
+
+
+def sched_next(c, last):
+    """Next due time; None = disabled. A missed run (launcher was off) is due immediately."""
+    if not c["enabled"]:
+        return None
+    nowd = datetime.datetime.now().replace(microsecond=0)
+    last = datetime.datetime.fromisoformat(last) if last else None
+    if c["mode"] == "interval":
+        return last + datetime.timedelta(hours=c["hours"]) if last else nowd
+    h, m = map(int, c["time"].split(":"))
+    base = last or nowd
+    for i in range(8):
+        d = (base + datetime.timedelta(days=i)).replace(hour=h, minute=m, second=0)
+        if d > base and d.weekday() in c["days"]:
+            return d
+    return None
+
+
+def save_sched(b):
+    tid = b.get("id")
+    if tid not in TASKS:
+        raise RuntimeError(f"Unknown task: {tid}")
+    mode = b.get("mode")
+    if mode not in ("interval", "daily"):
+        raise RuntimeError("Mode must be interval or daily")
+    hours = float(b.get("hours") or 0)
+    if mode == "interval" and not 0.25 <= hours <= 168:
+        raise RuntimeError("Interval must be between 0.25 and 168 hours")
+    t = (b.get("time") or "").strip()
+    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
+        raise RuntimeError("Time must be HH:MM")
+    days = sorted({int(d) for d in b.get("days") or [] if 0 <= int(d) <= 6})
+    if mode == "daily" and not days:
+        raise RuntimeError("Select at least one weekday")
+    with lock:
+        cfg = config()
+        cfg.setdefault("scheduler", {})[tid] = {"enabled": bool(b.get("enabled")), "mode": mode,
+                                                "hours": hours or 6, "time": t, "days": days or list(range(7))}
+        save(CONFIG, cfg)
+    log(f"Scheduler: '{TASKS[tid]['name']}' set to {sched_describe(sched_cfg(tid))}"
+        + ("" if b.get("enabled") else " (disabled)"))
+    return sched_view()
+
+
+def sched_run(tid):
+    """Run a task now (blocking); records last run and result."""
+    if tid in sched_running:
+        raise RuntimeError("Task is already running")
+    sched_running.add(tid)
+    started, ok = now(), True
+    try:
+        result = TASKS[tid]["run"]()
+    except Exception as e:
+        ok, result = False, str(e)
+        log(f"Scheduler: '{TASKS[tid]['name']}' failed: {e}")
+    finally:
+        sched_running.discard(tid)
+    with lock:
+        st = load(STATE, {})
+        st.setdefault("scheduler", {})[tid] = {"last_run": started, "finished": now(), "ok": ok, "result": result[:500]}
+        save(STATE, st)
+    return ok, result
+
+
+def sched_view():
+    st = load(STATE, {}).get("scheduler", {})
+    out = []
+    for tid, t in TASKS.items():
+        c, r = sched_cfg(tid), st.get(tid, {})
+        nxt = sched_next(c, r.get("last_run"))
+        out.append({"id": tid, "name": t["name"], "description": t["description"], "cfg": c,
+                    "schedule": sched_describe(c), "last_run": r.get("last_run"), "ok": r.get("ok"),
+                    "result": r.get("result"), "running": tid in sched_running,
+                    "blocked": tid == "typo3_release" and NO_WATCH,
+                    "next_run": nxt.isoformat(timespec="seconds") if nxt else None})
+    return out
+
+
+def scheduler():
+    while not stop_event.is_set():
+        st = load(STATE, {}).get("scheduler", {})
+        for tid in TASKS:
+            if tid in sched_running or (tid == "typo3_release" and NO_WATCH):
+                continue
+            nxt = sched_next(sched_cfg(tid), st.get(tid, {}).get("last_run"))
+            if nxt and nxt <= datetime.datetime.now():
+                threading.Thread(target=sched_run, args=(tid,), daemon=True).start()
+        stop_event.wait(30)
 
 
 # ---------------------------------------------------------------- HTTP
@@ -506,12 +812,13 @@ class Handler(BaseHTTPRequestHandler):
                 cfg, st = config(), load(STATE, {})
                 return self._send(200, {
                     "projects": cfg["projects"],
-                    "interval": cfg.get("check_interval_hours", 6),
+                    "scheduler": sched_view(),
                     "token_source": token_source()[0],
                     "email": email_cfg(),
                     "email_password_set": bool(smtp_password()),
                     "teams": teams_cfg(),
                     "teams_url_set": bool(teams_url()),
+                    "t3monitor_keys": [p["id"] for p in cfg["projects"] if t3m_key(p["id"])],
                     "last_check": st.get("last_check"),
                     "typo3_latest": st.get("typo3_latest", {}),
                     "typo3_seen": st.get("typo3_seen", {}),
@@ -519,6 +826,8 @@ class Handler(BaseHTTPRequestHandler):
                     "log": st.get("log", [])[:50]})
             if u.path == "/api/project-info":
                 return self._send(200, project_info(q["gitlab_url"][0], q["path"][0], q.get("ref", [""])[0]))
+            if u.path == "/api/t3monitor":
+                return self._send(200, t3m_view(find_project(q["project"][0])["id"]))
             if u.path == "/api/search":
                 return self._send(200, search_projects(q["gitlab_url"][0], q["q"][0]))
             if u.path == "/api/pipeline":
@@ -562,6 +871,13 @@ class Handler(BaseHTTPRequestHandler):
                 TOKEN_FILE.unlink(missing_ok=True)
                 log("GitLab token removed from app folder")
                 return self._send(200, {"ok": True})
+            if path == "/api/t3monitor/refresh":
+                p = find_project(body["project"])
+                try:
+                    t3m_fetch(p)
+                except RuntimeError:
+                    pass                                   # shown via last_error
+                return self._send(200, t3m_view(p["id"]))
             if path == "/api/teams":
                 return self._send(200, save_teams(body))
             if path == "/api/teams/test":
@@ -576,8 +892,15 @@ class Handler(BaseHTTPRequestHandler):
                 log(f"Test email sent to {', '.join(e['to'])}")
                 return self._send(200, {"msg": f"Test email sent to {', '.join(e['to'])}"})
             if path == "/api/check-now":
-                check_typo3()
-                return self._send(200, {"ok": True})
+                ok, result = sched_run("typo3_release")
+                return self._send(200 if ok else 500, {"ok": True} if ok else {"error": result})
+            if path == "/api/scheduler":
+                return self._send(200, save_sched(body))
+            if path == "/api/scheduler/run":
+                if body.get("id") not in TASKS:
+                    raise RuntimeError("Unknown task")
+                ok, result = sched_run(body["id"])
+                return self._send(200, {"ok": ok, "result": result, "scheduler": sched_view()})
             if path == "/api/projects":
                 return self._send(200, add_project(body))
             if path == "/api/projects/update":
@@ -587,6 +910,7 @@ class Handler(BaseHTTPRequestHandler):
                     cfg = config()
                     cfg["projects"] = [p for p in cfg["projects"] if p["id"] != body["id"]]
                     save(CONFIG, cfg)
+                t3m_key_file(body["id"]).unlink(missing_ok=True)
                 log(f"Project removed: {body['id']}")
                 return self._send(200, {"ok": True})
             return self._send(404, {"error": "not found"})
@@ -689,7 +1013,22 @@ def build_project(b, pid=None):
         "production": {
             "ref": (b.get("prod_ref") or "").strip(),
             "variables": b.get("prod_variables") or {},
-            "auto_play": _jobs(b.get("prod_play"))}}
+            "auto_play": _jobs(b.get("prod_play"))},
+        "t3monitor": {"url": _t3m_url(b.get("t3m_url"))}}
+
+
+def _t3m_url(v):
+    v = (v or "").strip()
+    if v and not re.match(r"https?://[^\s/]+", v):
+        raise RuntimeError("t3monitor URL must start with https://")
+    return v
+
+
+def save_t3m_key(pid, b):
+    if b.get("t3m_key_clear"):
+        t3m_key_file(pid).unlink(missing_ok=True)
+    elif (b.get("t3m_key") or "").strip():
+        t3m_save_key(pid, b["t3m_key"])
 
 
 def update_project(b):
@@ -699,6 +1038,7 @@ def update_project(b):
         for i, old in enumerate(cfg["projects"]):
             if old["id"] == pid:
                 new = build_project(b, pid)
+                save_t3m_key(pid, b)
                 cfg["projects"][i] = new
                 save(CONFIG, cfg)
                 break
@@ -719,6 +1059,7 @@ def add_project(b):
         cfg = config()
         if any(p["id"] == pid for p in cfg["projects"]):
             raise RuntimeError(f"Project already exists: {pid}")
+        save_t3m_key(pid, b)
         cfg["projects"].append(project)
         save(CONFIG, cfg)
     log(f"Project added: {pid}")
@@ -728,9 +1069,8 @@ def add_project(b):
 def main():
     port = int(config().get("port", 8787))
     srv = ThreadingHTTPServer((HOST, port), Handler)
-    if "--no-watch" not in sys.argv:
-        threading.Thread(target=watcher, daemon=True).start()
     resume_mail_watches()
+    threading.Thread(target=scheduler, daemon=True).start()
     print(f"GitLab Launcher: http://{HOST}:{port}", flush=True)
     if TLS_CERT and TLS_KEY and not (Path(TLS_CERT).exists() and Path(TLS_KEY).exists()):
         print(f"HTTPS disabled: certificate not found ({TLS_CERT})", flush=True)
