@@ -1,7 +1,7 @@
 services:
   launcher:
     build: .
-    container_name: gitlab-launcher
+    container_name: t3-watchdock
     restart: unless-stopped
     ports:
       - "127.0.0.1:8787:8787"   # http://127.0.0.1:8787 (must match "port" in config.json)

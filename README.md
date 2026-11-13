@@ -1,4 +1,4 @@
-# GitLab Pipeline Launcher
+# T3 Watchdock
 
 Small local web app to start GitLab pipelines, watch their jobs and play manual jobs — plus:
 
@@ -42,8 +42,8 @@ Pure Python standard library, no Python packages. Uses the `openssl` command for
 ## Quick start
 
 ```bash
-git clone git@github.com:sivaprasad1988/gitlab-launcher.git
-cd gitlab-launcher
+git clone git@github.com:sivaprasad1988/t3-watchdock.git
+cd t3-watchdock
 cp config.example.json config.json   # optional — projects can also be added in the UI
 docker compose up -d --build         # runs permanently, see "Run with Docker"
 ```
