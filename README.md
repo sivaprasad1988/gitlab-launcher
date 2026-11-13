@@ -1,5 +1,15 @@
 # T3 Watchdock
 
+> **Repo renamed** (was `gitlab-launcher`). If you cloned the old name, migrate once:
+> ```bash
+> docker compose down                                                          # stop old 'gitlab-launcher' container (name changed)
+> git remote set-url origin git@github.com:sivaprasad1988/t3-watchdock.git     # point at new repo name
+> git pull                                                                     # latest main
+> docker compose up -d --build                                                 # rebuild, container is now 't3-watchdock'
+> ```
+> Optional, cosmetic: `cd .. && mv gitlab-launcher t3-watchdock && cd t3-watchdock`.
+> Your `config.json`, `state.json` and key files are local and gitignored — untouched, no data migration.
+
 Small local web app to start GitLab pipelines, watch their jobs and play manual jobs — plus:
 
 - a **TYPO3 release watcher** that starts the staging pipelines automatically when a new TYPO3 version is published,
