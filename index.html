@@ -4,15 +4,26 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GitLab Launcher</title>
+<script>/* apply the saved theme before the page is drawn (no flash) */
+try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 <style>
 :root{
+  color-scheme:light;
   --bg:#f5f6f8;--card:#fff;--fg:#1c2230;--mut:#6b7280;--bd:#e4e7eb;--hover:#f0f2f5;
   --acc:#4f46e5;--acc-fg:#fff;--ok:#15803d;--err:#b91c1c;--run:#b45309;--chip:#eef0f4;
 }
-@media (prefers-color-scheme:dark){:root{
+/* Theme: auto (follows the system) unless the header switch sets data-theme="light" or "dark" */
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  color-scheme:dark;
   --bg:#0f1115;--card:#171a21;--fg:#e6e8ec;--mut:#9aa1ad;--bd:#272c36;--hover:#1e222b;
   --acc:#818cf8;--acc-fg:#0f1115;--ok:#4ade80;--err:#f87171;--run:#fbbf24;--chip:#232833;
 }}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0f1115;--card:#171a21;--fg:#e6e8ec;--mut:#9aa1ad;--bd:#272c36;--hover:#1e222b;
+  --acc:#818cf8;--acc-fg:#0f1115;--ok:#4ade80;--err:#f87171;--run:#fbbf24;--chip:#232833;
+}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 a{color:var(--acc);text-decoration:none}
@@ -24,6 +35,8 @@ nav a{color:var(--mut);padding:6px 12px;border-radius:6px;font-weight:500}
 nav a.on,nav a:hover{color:var(--fg);background:var(--hover)}
 .pill{font-size:12px;padding:3px 10px;border-radius:12px;background:var(--chip);color:var(--mut);white-space:nowrap}
 .pill.bad{color:var(--err)}
+.theme-btn{border:1px solid var(--bd);cursor:pointer;font:inherit;font-size:12px;color:var(--fg)}
+.theme-btn:hover{background:var(--hover)}
 main{max-width:1080px;margin:0 auto;padding:28px 16px 60px}
 .head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:20px}
 h1{font-size:22px;margin:0}h2{font-size:15px;margin:0 0 12px}
@@ -126,6 +139,7 @@ table.checks td:nth-child(1),table.checks td:nth-child(2){white-space:nowrap}
     <a href="#/scheduler" data-nav="scheduler">Scheduler</a>
     <a href="#/settings" data-nav="settings">Settings</a>
   </nav>
+  <button type="button" class="pill theme-btn" id="themeBtn">◐ Auto</button>
   <span class="pill" id="tokenPill">…</span>
 </div></header>
 <main id="view"></main>
@@ -158,6 +172,23 @@ const proj = id => S.projects.find(p => p.id === id);
 const pUrl = p => `#/p/${encodeURIComponent(p.id)}`;
 const glUrl = p => `${p.gitlab_url}/${p.path}/-/pipelines`;
 const fmt = t => t ? t.replace("T", " ") : "–";
+
+// Theme switch in the header: Auto (system) → Light → Dark; saved per browser
+const THEMES = [{id:"auto", label:"◐ Auto", hint:"follows the system setting"},
+  {id:"light", label:"☀ Light", hint:"always light"}, {id:"dark", label:"☾ Dark", hint:"always dark"}];
+function setTheme(id, save) {
+  const root = document.documentElement, t = THEMES.find(x => x.id === id) || THEMES[0];
+  if (t.id === "auto") delete root.dataset.theme; else root.dataset.theme = t.id;
+  if (save) try { t.id === "auto" ? localStorage.removeItem("theme") : localStorage.setItem("theme", t.id); } catch (e) {}
+  const b = $("#themeBtn"), next = THEMES[(THEMES.indexOf(t) + 1) % THEMES.length];
+  b.textContent = t.label; b.title = `Theme: ${t.id} (${t.hint}). Click for ${next.id}.`;
+  b.setAttribute("aria-label", b.title);
+}
+setTheme(document.documentElement.dataset.theme || "auto");
+$("#themeBtn").onclick = () => {
+  const cur = document.documentElement.dataset.theme || "auto";
+  setTheme(THEMES[(THEMES.findIndex(x => x.id === cur) + 1) % THEMES.length].id, true);
+};
 
 async function refresh() {
   S = await api("/api/state");
