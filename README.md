@@ -100,6 +100,7 @@ Microsoft Teams (no mail server needed):
 
 Email (optional, needs SMTP access): *Settings → Email notifications*: SMTP host, port, security, optional user/password, sender, recipients, tick *Send email notifications*, **Save & send test email**.
 
+- Before the staging pipelines of a new TYPO3 release start, one message "New TYPO3 x released: starting update on staging" lists all affected projects (sent once per project and version, not again on retries).
 - Only pipelines started automatically by the TYPO3 watcher are watched (not manual runs, Run all or promote).
 - The pipeline status is polled every 60 s; the message is sent once it has finished. After 24 h without a final status a "NOT FINISHED" message is sent.
 - If the pipeline could not be started, a "NOT STARTED" message is sent (on every failed retry).

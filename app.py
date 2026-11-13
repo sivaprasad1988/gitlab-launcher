@@ -191,7 +191,7 @@ def save_teams(b):
     return teams_cfg()
 
 
-def send_teams(title, intro, facts, link=None):
+def send_teams(title, intro, facts, link=None, link_title="Open pipeline"):
     """Post an Adaptive Card (format accepted by Teams Workflows and legacy incoming webhooks)."""
     url = teams_url()
     if not url:
@@ -202,7 +202,7 @@ def send_teams(title, intro, facts, link=None):
                 {"type": "TextBlock", "text": intro, "wrap": True},
                 {"type": "FactSet", "facts": [{"title": k, "value": str(v)} for k, v in facts]}]}
     if link:
-        card["actions"] = [{"type": "Action.OpenUrl", "title": "Open pipeline", "url": link}]
+        card["actions"] = [{"type": "Action.OpenUrl", "title": link_title, "url": link}]
     body = json.dumps({"type": "message", "attachments": [
         {"contentType": "application/vnd.microsoft.card.adaptive", "contentUrl": None, "content": card}]}).encode()
     req = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
@@ -215,11 +215,11 @@ def send_teams(title, intro, facts, link=None):
         raise RuntimeError(f"Teams not reachable: {e.reason}") from None
 
 
-def notify_event(title, intro, facts, link=None):
+def notify_event(title, intro, facts, link=None, link_title="Open pipeline"):
     """Send to every enabled channel (Teams, email); errors only go to the log."""
     if teams_cfg()["enabled"]:
         try:
-            send_teams(title, intro, facts, link)
+            send_teams(title, intro, facts, link, link_title)
             log(f"Teams message sent: {title}")
         except Exception as e:
             log(f"Teams message failed ({title}): {e}")
@@ -570,6 +570,26 @@ def latest_typo3(major):
         return json.load(r)["version"]
 
 
+def announce_update(due):
+    """Before the staging pipelines start: one message per new version (once per project and version)."""
+    with lock:
+        st = load(STATE, {})
+        done = st.setdefault("typo3_announced", {})
+        todo = [(p, prev, v) for p, prev, v in due if done.get(p["id"]) != v]
+        for p, _, v in todo:
+            done[p["id"]] = v
+        save(STATE, st)
+    for v in sorted({v for _, _, v in todo}):
+        items = [(p, prev) for p, prev, vv in todo if vv == v]
+        major = v.split(".")[0]
+        notify_event(f"New TYPO3 {v} released: starting update on staging",
+                     f"TYPO3 {v} has been published. The update pipeline is now started on staging for "
+                     f"{len(items)} project(s). Result messages follow when the pipelines have finished.",
+                     [(p["name"], f"{p['ref']} · {prev} → {v}") for p, prev in items],
+                     f"https://get.typo3.org/version/{major}", "TYPO3 release info")
+        log(f"Announced TYPO3 {v} update for {len(items)} project(s)")
+
+
 def check_typo3():
     projects = [p for p in config()["projects"] if p.get("auto_typo3", {}).get("enabled")]
     latest = {}
@@ -579,6 +599,7 @@ def check_typo3():
         except Exception as e:
             log(f"TYPO3 {major} check failed: {e}")
 
+    due = []                                   # (project, previous version, new version)
     for p in projects:
         major = int(p["auto_typo3"]["major"])
         if major not in latest:
@@ -595,25 +616,29 @@ def check_typo3():
                 save(STATE, st)
             log(f"Baseline TYPO3 {v} stored for {p['id']} (no trigger)")
         elif prev != v:
-            trigger = f"TYPO3 {prev} -> {v}"
-            try:
-                pl = run_pipeline(p, p["auto_typo3"].get("variables", {}), trigger,
-                                  p["auto_typo3"].get("auto_play", []))
-                with lock:
-                    st = load(STATE, {})
-                    st["typo3_seen"][p["id"]] = v
-                    save(STATE, st)
-                notify("TYPO3 update started", f"{p['name']}: {v} (pipeline #{pl['id']})")
-                start_mail_watch(p, pl, trigger)
-            except Exception as e:
-                # Not marked as seen -> retried on next check.
-                log(f"Auto-trigger failed for {p['id']} (TYPO3 {v}): {e}")
-                notify("TYPO3 auto-update FAILED", f"{p['name']}: {e}")
-                notify_event(f"TYPO3 update {p['name']}: NOT STARTED",
-                             "The automatic TYPO3 update pipeline could not be started. "
-                             "It is retried on the next check.",
-                             [("Project", f"{p['name']} ({p['path']})"), ("Branch", p["ref"]),
-                              ("Trigger", trigger), ("Error", e)])
+            due.append((p, prev, v))
+
+    announce_update(due)
+    for p, prev, v in due:
+        trigger = f"TYPO3 {prev} -> {v}"
+        try:
+            pl = run_pipeline(p, p["auto_typo3"].get("variables", {}), trigger,
+                              p["auto_typo3"].get("auto_play", []))
+            with lock:
+                st = load(STATE, {})
+                st["typo3_seen"][p["id"]] = v
+                save(STATE, st)
+            notify("TYPO3 update started", f"{p['name']}: {v} (pipeline #{pl['id']})")
+            start_mail_watch(p, pl, trigger)
+        except Exception as e:
+            # Not marked as seen -> retried on next check.
+            log(f"Auto-trigger failed for {p['id']} (TYPO3 {v}): {e}")
+            notify("TYPO3 auto-update FAILED", f"{p['name']}: {e}")
+            notify_event(f"TYPO3 update {p['name']}: NOT STARTED",
+                         "The automatic TYPO3 update pipeline could not be started. "
+                         "It is retried on the next check.",
+                         [("Project", f"{p['name']} ({p['path']})"), ("Branch", p["ref"]),
+                          ("Trigger", trigger), ("Error", e)])
 
     with lock:
         st = load(STATE, {})
