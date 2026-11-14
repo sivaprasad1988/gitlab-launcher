@@ -96,13 +96,15 @@ def announce_update(due):
 
 
 def check_typo3():
+    """Returns (projects with auto-update, list of errors). Errors make the scheduler run count as failed."""
     projects = [p for p in config()["projects"] if p.get("auto_typo3", {}).get("enabled")]
-    latest = {}
+    latest, errors = {}, []
     for major in sorted({int(p["auto_typo3"]["major"]) for p in projects}):
         try:
             latest[major] = latest_typo3(major)
         except Exception as e:
             log(f"TYPO3 {major} check failed: {e}")
+            errors.append(f"TYPO3 {major} check failed: {e}")
 
     due = []                                   # (project, previous version, new version)
     for p in projects:
@@ -138,6 +140,7 @@ def check_typo3():
         except Exception as e:
             # Not marked as seen -> retried on next check.
             log(f"Auto-trigger failed for {p['id']} (TYPO3 {v}): {e}")
+            errors.append(f"Auto-trigger failed for {p['name']} (TYPO3 {v}): {e}")
             notify("TYPO3 auto-update FAILED", f"{p['name']}: {e}")
             notify_event(f"TYPO3 update {p['name']}: NOT STARTED",
                          "The automatic TYPO3 update pipeline could not be started. "
@@ -148,5 +151,7 @@ def check_typo3():
     with lock:
         st = load(STATE, {})
         st["last_check"] = now()
-        st["typo3_latest"] = {str(k): v for k, v in latest.items()}
+        # keep the last known version of a major whose check failed (used for the update hint in the UI)
+        st["typo3_latest"] = {**st.get("typo3_latest", {}), **{str(k): v for k, v in latest.items()}}
         save(STATE, st)
+    return projects, errors

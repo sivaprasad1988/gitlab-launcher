@@ -18,9 +18,13 @@ sched_running = set()
 
 
 def task_typo3_release():
-    check_typo3()
+    projects, errors = check_typo3()
+    if not projects:
+        return "No project with TYPO3 auto-update"
+    if errors:
+        raise RuntimeError(" | ".join(errors))
     latest = load(STATE, {}).get("typo3_latest", {})
-    return "Latest: " + (", ".join(f"TYPO3 {m}: {v}" for m, v in sorted(latest.items())) or "no project with TYPO3 auto-update")
+    return "Latest: " + ", ".join(f"TYPO3 {m}: {v}" for m, v in sorted(latest.items()))
 
 
 def task_t3monitor():
