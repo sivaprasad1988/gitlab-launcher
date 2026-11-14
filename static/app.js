@@ -148,6 +148,7 @@ function viewProject(p, pipelineId) {
       <div class="actions">
         <button class="btn" data-act="run" data-mode="normal">▶ Run pipeline</button>
         ${a.enabled ? `<button class="btn sec" data-act="run" data-mode="update">Run TYPO3 update</button>` : ""}
+        <button class="btn sec" data-act="updsend" title="Send ready-to-run commands for pending extension updates via Teams / email">Send update commands</button>
         <a class="btn sec" href="${pUrl(p)}/edit">Edit</a>
       </div>
     </div>
@@ -705,6 +706,12 @@ const actions = {
     el.disabled = true; el.textContent = "Running…";
     try { const r = await api("/api/scheduler/run", {id:el.dataset.id}); await refresh(); viewScheduler(); toast(r.result, !r.ok); }
     catch (e) { toast(e.message, true); el.disabled = false; el.textContent = "▶ Run now"; }
+  },
+  async updsend(el) {
+    el.disabled = true;
+    try { toast((await api("/api/updates/send", {project:$("#view").dataset.project})).msg); }
+    catch (e) { toast(e.message, true); }
+    el.disabled = false;
   },
   async t3mrefresh(el) {
     el.disabled = true; el.textContent = "Checking…";

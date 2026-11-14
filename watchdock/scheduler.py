@@ -8,6 +8,7 @@ from .core import CONFIG, STATE, config, load, lock, log, now, save, stop_event
 from .alerts import notify_event
 from .t3monitor import T3M_ENVS, _n, _upd_text, t3m_cfg, t3m_fetch, t3m_key
 from .watcher import check_typo3
+from .updates import send_update_commands
 
 
 # ---------------------------------------------------------------- scheduler
@@ -27,7 +28,7 @@ def task_t3monitor():
              if t3m_cfg(p, env).get("url") and t3m_key(p["id"], env)]
     if not sites:
         return "No project with t3monitor URL and key"
-    failed, facts, totals = [], [], {"err": 0, "upd": 0, "new": 0}
+    failed, facts, totals, results = [], [], {"err": 0, "upd": 0, "new": 0}, []
     for p, env in sites:
         name = f"{p['name']} ({T3M_ENVS[env]['label']})"
         try:
@@ -36,6 +37,7 @@ def task_t3monitor():
             failed.append(f"{name}: {e}")
             facts.append((name, f"❌ CHECK FAILED: {e}"))
             continue
+        results.append((p, env, r))
         d, sev = r["data"], [x.get("severity") for x in r["data"].get("status", [])]
         upd = {k: e for k, e in d["extensions"].items() if e.get("update")}
         totals["err"] += sev.count(2)
@@ -53,6 +55,10 @@ def task_t3monitor():
     notify_event("t3monitor check: " + " · ".join(head),
                  "Scheduled TYPO3 status check" + (f" – {totals['new']} new finding(s)." if totals["new"] else "."),
                  facts, f"http://127.0.0.1:{int(config().get('port', 8787))}/", "Open launcher")
+    try:
+        send_update_commands(results)
+    except Exception as e:                     # never fail the status check because of the extra message
+        log(f"Update commands failed: {e}")
     if failed:
         raise RuntimeError(f"{len(sites) - len(failed)}/{len(sites)} OK. " + " | ".join(failed))
     return f"{len(sites)}/{len(sites)} site(s) checked"
