@@ -185,7 +185,7 @@ Open <http://127.0.0.1:8787>. All data — `config.json`, `state.json`, `t3monit
 
 | Task | Command |
 |---|---|
-| Update after code changes (`app.py` or `index.html`) | `docker compose up -d --build` |
+| Update after code changes (`watchdock/` or `static/`) | `docker compose up -d --build` |
 | Logs | `docker compose logs -f` |
 | Restart | `docker compose restart` |
 | Stop | `docker compose down` |
@@ -229,8 +229,17 @@ Notes:
 
 | File | Purpose |
 |---|---|
-| `app.py` | Server, GitLab API client, TYPO3 watcher, scheduler, notifications, t3monitor client |
-| `index.html` | Web UI |
+| `app.py` | Entry point (starts `watchdock.server.main`) |
+| `watchdock/core.py` | Paths, settings, shared state, JSON storage |
+| `watchdock/alerts.py` | E-mail and Microsoft Teams notifications |
+| `watchdock/gitlab.py` | GitLab API: token, pipelines, manual jobs, project lookup |
+| `watchdock/extensions.py` | Extension update check (Packagist) and changelogs |
+| `watchdock/t3monitor.py` | t3monitor client, history, change detection |
+| `watchdock/watcher.py` | TYPO3 release watcher, pipeline result mails |
+| `watchdock/projects.py` | Create / update project entries |
+| `watchdock/scheduler.py` | Background scheduler |
+| `watchdock/server.py` | HTTP server and API routes |
+| `static/` | Web UI (`index.html`, `style.css`, `app.js`) |
 | `config.example.json` | Example configuration |
 | `Dockerfile`, `compose.yaml` | Docker setup |
 | `certs/` | mkcert certificate + key (gitignored) |

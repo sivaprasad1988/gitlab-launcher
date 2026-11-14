@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T3 Watchdock</title>
+<script>/* apply the saved theme and style before the page is drawn (no flash) */
+try { const t = localStorage.getItem("theme"), s = localStorage.getItem("style");
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  if (s === "terminal" || s === "turbo") document.documentElement.dataset.style = s; } catch (e) {}
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header><div class="bar">
+  <a class="brand" href="#/">T3 Watchdock</a>
+  <nav>
+    <a href="#/" data-nav="projects">Projects</a>
+    <a href="#/activity" data-nav="activity">Activity</a>
+    <a href="#/scheduler" data-nav="scheduler">Scheduler</a>
+    <a href="#/settings" data-nav="settings">Settings</a>
+  </nav>
+  <div class="hdr-tools">
+    <select class="pill style-sel" id="styleSel" title="Style" aria-label="Style">
+      <option value="default">Default</option><option value="terminal">Terminal</option><option value="turbo">Turbo C++</option></select>
+    <button type="button" class="pill theme-btn" id="themeBtn">◐ Auto</button>
+  </div>
+  <span class="pill" id="tokenPill">…</span>
+</div></header>
+<main id="view"></main>
+<div id="toast" role="status" aria-live="polite" title="Click to close"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,3 +1,5 @@
 *
 !app.py
-!index.html
+!watchdock/
+!static/
+**/__pycache__
