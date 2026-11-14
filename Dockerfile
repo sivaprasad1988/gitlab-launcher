@@ -9,7 +9,9 @@ ENV PYTHONUNBUFFERED=1 \
     LAUNCHER_DATA=/data
 
 WORKDIR /app
-COPY app.py index.html ./
+COPY app.py ./
+COPY watchdock/ watchdock/
+COPY static/ static/
 
 EXPOSE 8787
 CMD ["python", "app.py"]
