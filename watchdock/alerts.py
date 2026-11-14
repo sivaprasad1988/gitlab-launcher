@@ -95,7 +95,7 @@ def save_teams(b):
     return teams_cfg()
 
 
-def send_teams(title, intro, facts, link=None, link_title="Open pipeline"):
+def send_teams(title, intro, facts, link=None, link_title="Open pipeline", code=None):
     """Post an Adaptive Card (format accepted by Teams Workflows and legacy incoming webhooks)."""
     url = teams_url()
     if not url:
@@ -106,6 +106,9 @@ def send_teams(title, intro, facts, link=None, link_title="Open pipeline"):
                 {"type": "TextBlock", "text": intro, "wrap": True}]}
     if facts:                                  # an empty FactSet can make Teams reject the whole card
         card["body"].append({"type": "FactSet", "facts": [{"title": str(k), "value": str(v)} for k, v in facts]})
+    if code:                                   # monospace block to copy (e.g. update commands)
+        card["body"].append({"type": "TextBlock", "text": code, "fontType": "Monospace", "wrap": True,
+                             "separator": True})
     if link:
         card["actions"] = [{"type": "Action.OpenUrl", "title": link_title, "url": link}]
     body = json.dumps({"type": "message", "attachments": [
@@ -121,17 +124,17 @@ def send_teams(title, intro, facts, link=None, link_title="Open pipeline"):
         raise RuntimeError(f"Teams not reachable: {e.reason}") from None
 
 
-def notify_event(title, intro, facts, link=None, link_title="Open pipeline"):
+def notify_event(title, intro, facts, link=None, link_title="Open pipeline", code=None):
     """Send to every enabled channel (Teams, email); errors only go to the log."""
     if teams_cfg()["enabled"]:
         try:
-            send_teams(title, intro, facts, link, link_title)
+            send_teams(title, intro, facts, link, link_title, code)
             log(f"Teams message sent: {title}")
         except Exception as e:
             log(f"Teams message failed ({title}): {e}")
     if email_cfg()["enabled"]:
         text = intro + "\n\n" + "\n".join(f"{k + ':':<10}{v}" for k, v in facts) + \
-            (f"\n{'Link:':<10}{link}" if link else "") + "\n"
+            (f"\n{'Link:':<10}{link}" if link else "") + (f"\n\n{code}\n" if code else "") + "\n"
         try:
             send_mail("[T3 Watchdock] " + title, text)
             log(f"Email sent: {title}")

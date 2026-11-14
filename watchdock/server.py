@@ -13,6 +13,7 @@ from .gitlab import find_project, gitlab, project_info, promote, run_pipeline, s
 from .t3monitor import T3M_ENVS, t3m_auth_file, t3m_auth_password, t3m_env, t3m_fetch, t3m_key, t3m_key_file, t3m_summary, t3m_view
 from .watcher import resume_mail_watches
 from .projects import add_project, update_project
+from .updates import send_now
 from .scheduler import TASKS, save_sched, sched_run, sched_view, scheduler
 
 
@@ -124,6 +125,8 @@ class Handler(BaseHTTPRequestHandler):
                 trig = "manual TYPO3 update" if body.get("mode") == "update" else "manual"
                 return self._send(200, run_pipeline(p, src.get("variables", {}), trig,
                                                     src.get("auto_play", [])))
+            if path == "/api/updates/send":
+                return self._send(200, {"msg": send_now(find_project(body["project"]))})
             if path == "/api/play":
                 p = find_project(body["project"])
                 r = gitlab(p, "POST", f"/jobs/{int(body['job'])}/play")
